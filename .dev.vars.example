@@ -1,0 +1,12 @@
+# Copy to .dev.vars (gitignored) and fill in real values for local dev.
+# These come from registering the App at developer.servicem8.com -- see
+# Task "Register App in ServiceM8 Developer Portal" / plan Phase 0.
+
+SERVICEM8_APP_ID=
+SERVICEM8_APP_SECRET=
+
+# Base URL this Worker is reachable at -- used to build the OAuth2
+# redirect_uri and the webhook callback URL registered with ServiceM8.
+# ServiceM8 needs a public HTTPS URL, so local dev testing of the OAuth/
+# webhook flows requires the *.workers.dev deployment, not plain `wrangler dev`.
+PUBLIC_BASE_URL=https://renewal-autopilot.<your-subdomain>.workers.dev

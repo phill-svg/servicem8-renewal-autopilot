@@ -1,0 +1,250 @@
+// Renewal Autopilot -- router + cron entry points.
+// See C:\Users\Phill\.claude\plans\scalable-painting-beacon.md for the full
+// design/rationale. Phase 1 scope: OAuth install, webhook receipt, the
+// due-detection engine. No staff-facing UI or real message sending yet
+// (Phase 2 -- src/addon.js, src/messaging.js).
+
+import { randomId, json, escapeHtml } from "./util.js";
+import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
+import { getJob } from "./servicem8-api.js";
+import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
+
+// ---- install / OAuth2 ------------------------------------------------
+
+// Entry point a business hits to install (from the ServiceM8 Add-on Store,
+// or -- pre-listing -- the Developer Portal's Private Add-on Install URL,
+// which is expected to land here too). `state` is a CSRF nonce carried
+// through the redirect round-trip via query string (no server-side session
+// exists yet at this point -- there's no tenant to attach one to).
+async function handleInstallStart(request, env) {
+  const url = new URL(request.url);
+  const state = randomId(16);
+  const authorizeUrl = buildAuthorizeUrl({
+    appId: env.SERVICEM8_APP_ID,
+    redirectUri: `${url.origin}/oauth/callback`,
+    state,
+  });
+  return Response.redirect(authorizeUrl, 302);
+}
+
+function installedPageHtml() {
+  return `<!doctype html><html><body style="font-family:sans-serif;padding:2rem;max-width:32rem;margin:0 auto;">
+    <h2>Renewal Autopilot is installed</h2>
+    <p>Open ServiceM8 and look for Renewal Autopilot in your Add-ons menu to configure which job categories to track and how often each one recurs.</p>
+  </body></html>`;
+}
+
+function installErrorHtml(message) {
+  return `<!doctype html><html><body style="font-family:sans-serif;padding:2rem;color:#c41613;">${escapeHtml(message)}</body></html>`;
+}
+
+// Note: `state` is generated per-install-attempt but not currently verified
+// against a stored value (no session to store it in before a tenant exists).
+// This is a known gap, not an oversight -- acceptable for Phase 1 testing
+// against TCB's own account; revisit before Partner Preview submission if a
+// stronger CSRF guarantee is needed for the public flow.
+async function handleOAuthCallback(request, env, ctx) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  if (!code) return new Response(installErrorHtml("Missing authorization code."), { status: 400, headers: { "Content-Type": "text/html" } });
+
+  let tokens;
+  try {
+    tokens = await exchangeCodeForTokens(env, { code, redirectUri: `${url.origin}/oauth/callback` });
+  } catch (err) {
+    console.error("oauth callback: token exchange failed", err);
+    return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
+  }
+
+  // We generate our own tenant_id rather than trying to resolve ServiceM8's
+  // real accountUUID up front -- there's no confirmed "whoami" endpoint (see
+  // plan's open risks), and we don't actually need their UUID as our own
+  // primary key. Webhook delivery-to-tenant attribution is handled via a
+  // `?tenant=` query param on the callback URL we register (see
+  // registerAllWebhooks), not by matching an account identifier out of
+  // ServiceM8's payload.
+  const tenantId = randomId();
+  const now = Date.now();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO tenants (servicem8_account_uuid, status, backfill_complete, backfill_cursor, installed_at)
+       VALUES (?, 'active', 0, NULL, ?)`
+    )
+      .bind(tenantId, now)
+      .run();
+    await storeTokens(env.DB, tenantId, tokens);
+    await env.DB.prepare(
+      `INSERT INTO tenant_settings (tenant_id, default_channel) VALUES (?, 'sms')`
+    )
+      .bind(tenantId)
+      .run();
+  } catch (err) {
+    console.error("oauth callback: failed to persist new tenant", err);
+    return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
+  }
+
+  const callbackUrl = `${url.origin}/webhooks/servicem8?tenant=${tenantId}`;
+  const registerWebhooks = registerAllWebhooks(env, tenantId, callbackUrl);
+  if (ctx && ctx.waitUntil) ctx.waitUntil(registerWebhooks);
+  else await registerWebhooks;
+
+  return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
+}
+
+// ---- webhooks ----------------------------------------------------------
+
+async function handleWebhook(request, env, ctx) {
+  const handshake = await maybeHandleHandshake(request);
+  if (handshake) return handshake;
+
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  const contentType = request.headers.get("Content-Type") || "";
+  const rawBody = await request.clone().text();
+  await captureRawDelivery(env.DB, { tenantId, contentType, body: rawBody });
+
+  if (!tenantId) {
+    console.error("webhook: no ?tenant= on callback URL, cannot attribute delivery");
+    return json({ ok: true, skipped: "no-tenant" });
+  }
+  const tenant = await env.DB.prepare("SELECT * FROM tenants WHERE servicem8_account_uuid = ?").bind(tenantId).first();
+  if (!tenant || tenant.status !== "active") {
+    return json({ ok: true, skipped: "unknown-or-inactive-tenant" });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    payload = null;
+  }
+  const { jobUuid } = parseWebhookPayload(payload);
+  if (!jobUuid) {
+    console.error(`webhook: no job uuid found in payload for tenant ${tenantId}`, rawBody.slice(0, 500));
+    return json({ ok: true, skipped: "no-job-uuid" });
+  }
+
+  const work = handleJobWebhook(env, tenantId, jobUuid);
+  if (ctx && ctx.waitUntil) ctx.waitUntil(work);
+  else await work;
+
+  return json({ ok: true });
+}
+
+// A single job changed -- look up its category and recompute just that
+// category for this tenant. Not the cheapest possible approach (recompute
+// pulls all of that category's completed jobs, not just this one), but
+// correct and simple for Phase 1; worth revisiting for efficiency once a
+// tenant with real volume is on the system.
+async function handleJobWebhook(env, tenantId, jobUuid) {
+  let job;
+  try {
+    job = await getJob(env, tenantId, jobUuid);
+  } catch (err) {
+    console.error(`webhook: failed to fetch job ${jobUuid} for tenant ${tenantId}`, err);
+    return;
+  }
+  if (!job || job.status !== "Completed" || !job.category_uuid) return;
+
+  const category = await env.DB.prepare(
+    "SELECT * FROM category_config WHERE tenant_id = ? AND servicem8_category_uuid = ? AND is_tracked = 1"
+  )
+    .bind(tenantId, job.category_uuid)
+    .first();
+  if (!category) return; // this job's category isn't configured for tracking
+
+  try {
+    await recomputeCategory(env, tenantId, category);
+  } catch (err) {
+    console.error(`webhook: recompute failed for tenant ${tenantId}, category ${job.category_uuid}`, err);
+  }
+}
+
+// ---- scheduled (cron) ----------------------------------------------------
+//
+// Two schedules configured in wrangler.jsonc: a nightly full reconciliation
+// (source-of-truth backstop for missed/expired webhooks) and a short
+// 2-minute sweep for chunked backfill continuation + proactive token
+// refresh. Distinguished by event.cron.
+
+const NIGHTLY_CRON = "0 16 * * *";
+
+async function runNightlyReconciliation(env) {
+  const { results: tenants } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active'").all();
+  for (const tenant of tenants || []) {
+    const runId = randomId();
+    const startedAt = Date.now();
+    try {
+      const { jobsScanned } = await recomputeAllCategoriesForTenant(env, tenant.servicem8_account_uuid);
+      await env.DB.prepare(
+        `INSERT INTO cron_runs (id, tenant_id, started_at, finished_at, jobs_scanned, due_found, error)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL)`
+      )
+        .bind(runId, tenant.servicem8_account_uuid, startedAt, Date.now(), jobsScanned)
+        .run();
+    } catch (err) {
+      console.error(`nightly reconciliation failed for tenant ${tenant.servicem8_account_uuid}`, err);
+      await env.DB.prepare(
+        `INSERT INTO cron_runs (id, tenant_id, started_at, finished_at, jobs_scanned, due_found, error)
+         VALUES (?, ?, ?, ?, NULL, NULL, ?)`
+      )
+        .bind(randomId(), tenant.servicem8_account_uuid, startedAt, Date.now(), String(err && err.message))
+        .run();
+    }
+  }
+}
+
+async function runBackfillAndRefreshSweep(env) {
+  const { results: pending } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active' AND backfill_complete = 0").all();
+  for (const tenant of pending || []) {
+    try {
+      await backfillChunk(env, tenant);
+    } catch (err) {
+      console.error(`backfill chunk failed for tenant ${tenant.servicem8_account_uuid}`, err);
+    }
+  }
+
+  // Proactively refresh tokens expiring soon, so a quiet tenant (no webhook
+  // traffic) never has its very first API call of the day fail on an
+  // expired token -- getValidAccessToken would still handle it inline, but
+  // this keeps steady-state latency off the critical path.
+  const soon = Date.now() + 5 * 60_000;
+  const { results: expiringSoon } = await env.DB.prepare(
+    "SELECT tenant_id FROM oauth_tokens WHERE access_token_expires_at < ?"
+  )
+    .bind(soon)
+    .all();
+  for (const row of expiringSoon || []) {
+    try {
+      await getValidAccessToken(env, row.tenant_id);
+    } catch (err) {
+      console.error(`proactive token refresh failed for tenant ${row.tenant_id}`, err);
+    }
+  }
+}
+
+// ---- router --------------------------------------------------------------
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const { pathname, searchParams } = url;
+    const method = request.method;
+
+    if (pathname === "/install" && method === "GET") return handleInstallStart(request, env);
+    if (pathname === "/oauth/callback" && method === "GET") return handleOAuthCallback(request, env, ctx);
+    if (pathname === "/webhooks/servicem8" && method === "POST") return handleWebhook(request, env, ctx);
+
+    if (pathname === "/") {
+      return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
+    }
+
+    return json({ error: "not found" }, { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    const work = event.cron === NIGHTLY_CRON ? runNightlyReconciliation(env) : runBackfillAndRefreshSweep(env);
+    if (ctx && ctx.waitUntil) ctx.waitUntil(work);
+    else await work;
+  },
+};

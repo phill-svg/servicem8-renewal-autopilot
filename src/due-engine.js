@@ -1,0 +1,225 @@
+// Due-detection engine: generalizes the bucketing logic hand-validated this
+// session against a real ServiceM8 job export (grouping by customer,
+// months-since-last-completed-service, excluding already-rebooked
+// customers) into a per-tenant, per-configured-category, D1-backed engine.
+//
+// The address-normalization approach here is the direct fix for a real bug
+// found this session: grouping by company+full-address produced duplicate
+// customer rows when the same property's address was formatted slightly
+// differently across job records (suburb/state/postcode present on one job,
+// missing on another). Keying on the street-address line only fixed it.
+
+import { randomId, parseServiceM8Date, isoDate } from "./util.js";
+import { listCompletedJobsForCategory, listOpenJobsForCompany, getPrimaryContact } from "./servicem8-api.js";
+
+const BACKFILL_CHUNK_DAYS = 180; // ~6 months per chunk, keeps each API call and D1 batch bounded
+
+function normalizeStreet(addr) {
+  return (addr || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, "");
+}
+
+function addMonths(date, months) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays) {
+  const dueSoonStart = addDays(dueDate, -dueSoonLeadDays);
+  const overdueStart = addDays(dueDate, overdueGraceDays);
+  if (today >= overdueStart) return "overdue";
+  if (today >= dueDate) return "due";
+  if (today >= dueSoonStart) return "due_soon";
+  return null; // not yet in any actionable bucket
+}
+
+// One chunk of historical backfill for a tenant: pulls jobs completed before
+// the current cursor, in a bounded window, and advances the cursor. Called
+// repeatedly by the short-interval cron sweep (see src/index.js's
+// scheduled()) until backfill_complete=1. Kept separate from
+// computeDueForTenant so a large tenant's full history is never fetched in
+// one Worker invocation.
+export async function backfillChunk(env, tenant) {
+  const categories = await env.DB.prepare(
+    "SELECT * FROM category_config WHERE tenant_id = ? AND is_tracked = 1"
+  )
+    .bind(tenant.servicem8_account_uuid)
+    .all();
+
+  const cursor = tenant.backfill_cursor ? new Date(tenant.backfill_cursor) : new Date();
+  const chunkStart = addDays(cursor, -BACKFILL_CHUNK_DAYS);
+
+  let sawAnyJob = false;
+  for (const cat of categories.results || []) {
+    const jobs = await listCompletedJobsForCategory(env, tenant.servicem8_account_uuid, cat.servicem8_category_uuid, {
+      before: isoDate(cursor),
+    });
+    if (Array.isArray(jobs) && jobs.length) sawAnyJob = true;
+    await upsertJobsAsDueCandidates(env, tenant.servicem8_account_uuid, cat, jobs || []);
+  }
+
+  const now = Date.now();
+  if (chunkStart <= new Date("2000-01-01") || !sawAnyJob) {
+    // Reached a sane floor, or this chunk found nothing at all -- treat as
+    // done rather than walking back to the epoch forever on a quiet chunk.
+    // (A tenant with a genuine multi-decade history but a gap in one
+    // 6-month window would stop early here -- acceptable for v1, flagged as
+    // a known simplification rather than silently "correct.")
+    await env.DB.prepare("UPDATE tenants SET backfill_complete = 1, backfill_cursor = NULL WHERE servicem8_account_uuid = ?")
+      .bind(tenant.servicem8_account_uuid)
+      .run();
+  } else {
+    await env.DB.prepare("UPDATE tenants SET backfill_cursor = ? WHERE servicem8_account_uuid = ?")
+      .bind(isoDate(chunkStart), tenant.servicem8_account_uuid)
+      .run();
+  }
+}
+
+// Groups raw jobs by (company_uuid, normalized street address), keeps the
+// most-recently-completed job per group, and upserts a candidate row --
+// shared by both the backfill path and the live webhook-triggered path.
+async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
+  const groups = new Map();
+  for (const job of jobs) {
+    const completedAt = parseServiceM8Date(job.completion_date);
+    if (!completedAt || !job.company_uuid) continue;
+    const key = `${job.company_uuid}|${normalizeStreet(job.job_address)}`;
+    const existing = groups.get(key);
+    if (!existing || completedAt > existing.completedAt) {
+      groups.set(key, { job, completedAt, addressKey: normalizeStreet(job.job_address) });
+    }
+  }
+
+  const today = new Date();
+  for (const [, { job, completedAt, addressKey }] of groups) {
+    const dueDate = addMonths(completedAt, category.interval_months);
+    const bucket = bucketFor(today, dueDate, category.due_soon_lead_days, category.overdue_grace_days);
+    if (!bucket) continue; // not due yet -- don't create noise rows for every customer, only actionable ones
+
+    let suppressedReason = null;
+    try {
+      const openJobs = await listOpenJobsForCompany(env, tenantId, job.company_uuid);
+      if (Array.isArray(openJobs) && openJobs.length > 0) suppressedReason = "open_pipeline_job";
+    } catch (err) {
+      // If the open-jobs check itself fails, don't block the due-candidate
+      // row on it -- worst case a customer who's actually already rebooked
+      // shows up in the queue once, which a human reviewing it will notice.
+      console.error(`due-engine: open-jobs check failed for company ${job.company_uuid}:`, err);
+    }
+
+    let contact = null;
+    try {
+      contact = await getPrimaryContact(env, tenantId, job.company_uuid);
+    } catch (err) {
+      console.error(`due-engine: contact lookup failed for company ${job.company_uuid}:`, err);
+    }
+
+    const id = randomId();
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO due_customers (
+         id, tenant_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
+         last_job_uuid, last_completed_at, bucket, suppressed_reason,
+         contact_name_cache, contact_email_cache, contact_phone_cache, computed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, servicem8_category_uuid) DO UPDATE SET
+         last_job_uuid = excluded.last_job_uuid,
+         last_completed_at = excluded.last_completed_at,
+         bucket = excluded.bucket,
+         suppressed_reason = excluded.suppressed_reason,
+         contact_name_cache = excluded.contact_name_cache,
+         contact_email_cache = excluded.contact_email_cache,
+         contact_phone_cache = excluded.contact_phone_cache,
+         computed_at = excluded.computed_at`
+    )
+      .bind(
+        id,
+        tenantId,
+        job.company_uuid,
+        addressKey,
+        job.job_address || "",
+        category.servicem8_category_uuid,
+        job.uuid,
+        job.completion_date,
+        bucket,
+        suppressedReason,
+        contact?.name || "",
+        contact?.email || "",
+        contact?.mobile || contact?.phone || "",
+        now
+      )
+      .run();
+
+    if (!suppressedReason) {
+      await maybeCreateReminderDraft(env, tenantId, id);
+    }
+  }
+}
+
+// Creates a draft reminder the first time a due_customers row enters an
+// actionable bucket -- UNIQUE(due_customer_id, channel) makes re-running the
+// engine idempotent, so this never spams duplicate drafts on repeat runs.
+// Draft content is a sensible default until the tenant configures a real
+// template in the Phase 2 setup wizard (tenant_settings.sms_template).
+async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
+  const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
+  const channel = settings?.default_channel || "sms";
+  const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
+
+  const body =
+    channel === "sms"
+      ? (settings?.sms_template || "Hi {{name}}, you're due for your next service. Reply or call us to book a time.").replace(
+          "{{name}}",
+          dueCustomer.contact_name_cache || "there"
+        )
+      : (settings?.email_body_template || "Hi {{name}},\n\nYou're due for your next service. Let us know a time that suits.").replace(
+          "{{name}}",
+          dueCustomer.contact_name_cache || "there"
+        );
+
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, draft_subject, draft_body, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
+  )
+    .bind(
+      randomId(),
+      tenantId,
+      dueCustomerId,
+      channel,
+      channel === "email" ? settings?.email_subject_template || "You're due for your next service" : null,
+      body,
+      Date.now()
+    )
+    .run();
+}
+
+// Full recompute for one category on one tenant -- used by the live
+// webhook-triggered path (a single job.completed doesn't need a backfill
+// chunk, it needs this category's candidates refreshed) and by the nightly
+// reconciliation cron as the source-of-truth backstop.
+export async function recomputeCategory(env, tenantId, categoryConfigRow) {
+  const jobs = await listCompletedJobsForCategory(env, tenantId, categoryConfigRow.servicem8_category_uuid);
+  await upsertJobsAsDueCandidates(env, tenantId, categoryConfigRow, jobs || []);
+}
+
+export async function recomputeAllCategoriesForTenant(env, tenantId) {
+  const { results } = await env.DB.prepare("SELECT * FROM category_config WHERE tenant_id = ? AND is_tracked = 1")
+    .bind(tenantId)
+    .all();
+  let jobsScanned = 0;
+  for (const cat of results || []) {
+    const jobs = await listCompletedJobsForCategory(env, tenantId, cat.servicem8_category_uuid);
+    jobsScanned += (jobs || []).length;
+    await upsertJobsAsDueCandidates(env, tenantId, cat, jobs || []);
+  }
+  return { jobsScanned };
+}

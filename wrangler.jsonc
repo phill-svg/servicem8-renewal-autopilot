@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "renewal-autopilot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  // TODO: add a custom_domain route once this product has its own domain, e.g.:
+  // "routes": [{ "pattern": "renewalautopilot.example.com", "custom_domain": true }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "renewal-autopilot-db",
+      "database_id": "467d6878-c491-4100-bce5-5943207bc45f"
+    }
+  ],
+  // TODO: wire up Cloudflare Email Sending once this product's own sending
+  // domain is onboarded (see tcb-customer-portal's send_email block for the
+  // pattern -- needs its own domain/subdomain, not TCB's).
+  // "send_email": [
+  //   { "name": "EMAIL", "allowed_sender_addresses": ["noreply@..."], "remote": true }
+  // ],
+  "triggers": {
+    // Nightly full reconciliation (source-of-truth backstop for missed/expired
+    // webhooks) plus a short-interval sweep for chunked backfill continuation
+    // and proactive token refresh. See src/due-engine.js and src/servicem8-oauth.js.
+    "crons": ["0 16 * * *", "*/2 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  }
+}
