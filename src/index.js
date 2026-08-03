@@ -436,6 +436,12 @@ export default {
 
     if (pathname === "/install" && method === "GET") return handleInstallStart(request, env);
     if (pathname === "/oauth/callback" && method === "GET") return handleOAuthCallback(request, env, ctx);
+    // The Developer Portal only exposes one "Callback URL" field for the
+    // whole app -- confirmed via wrangler tail against a real job-card click,
+    // which arrived as a POST to this same path ServiceM8 uses for the OAuth
+    // redirect (a GET with ?code=). The manifest action's "url" key is not
+    // actually honoured. Dispatch by method rather than path.
+    if (pathname === "/oauth/callback" && method === "POST") return handleAddonQueue(request, env);
     if (pathname === "/webhooks/servicem8" && method === "POST") return handleWebhook(request, env, ctx);
 
     if (pathname === "/addon/queue" && method === "POST") return handleAddonQueue(request, env);
