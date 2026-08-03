@@ -6,9 +6,9 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges, createCompanyContact, sendPlatformSms } from "./servicem8-api.js";
+import { getJob, listCategories } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -67,48 +67,35 @@ async function handleOAuthCallback(request, env, ctx) {
   // registerAllWebhooks), not by matching an account identifier out of
   // ServiceM8's payload.
   //
-  // A retried/rescoped install (e.g. changing OAuth scopes in the Developer
-  // Portal) hits this same callback again with no way to know it's "the same"
-  // ServiceM8 account until its first addon-callback JWT resolves it -- see
-  // resolveTenantFromAccountUuid. If exactly one already-resolved tenant
-  // exists, treat this as a reinstall of that tenant (refresh its token in
-  // place) rather than minting a new row that would need re-resolving. This
-  // is still a single-real-tenant simplification, same as
-  // resolveTenantFromAccountUuid -- true multi-tenant reinstall handling
-  // needs a real account-identifying call, which doesn't exist yet.
-  const { results: resolvedTenants } = await env.DB.prepare(
-    "SELECT * FROM tenants WHERE status = 'active' AND resolved_account_uuid IS NOT NULL"
-  ).all();
-
-  let tenantId;
+  // Always create a fresh provisional row here rather than guessing "this
+  // must be a reinstall of the one tenant that already exists" -- a genuinely
+  // new second business installing while exactly one resolved tenant already
+  // exists is indistinguishable from that tenant reinstalling at this point
+  // (no accountUUID yet), and the old "if exactly one resolved tenant exists,
+  // overwrite its tokens" shortcut would silently hijack an existing real
+  // tenant's credentials with a brand new business's tokens. Reinstalls of an
+  // already-known tenant get reconciled properly once their first
+  // addon-callback JWT arrives -- see resolveTenantFromAccountUuid, which
+  // migrates the freshest unresolved candidate's tokens onto the correct
+  // existing tenant row rather than leaving them orphaned.
+  const tenantId = randomId();
   const now = Date.now();
-  if ((resolvedTenants || []).length === 1) {
-    tenantId = resolvedTenants[0].servicem8_account_uuid;
-    try {
-      await storeTokens(env.DB, tenantId, tokens);
-    } catch (err) {
-      console.error("oauth callback: failed to refresh existing tenant's tokens", err);
-      return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
-    }
-  } else {
-    tenantId = randomId();
-    try {
-      await env.DB.prepare(
-        `INSERT INTO tenants (servicem8_account_uuid, status, backfill_complete, backfill_cursor, installed_at)
-         VALUES (?, 'active', 0, NULL, ?)`
-      )
-        .bind(tenantId, now)
-        .run();
-      await storeTokens(env.DB, tenantId, tokens);
-      await env.DB.prepare(
-        `INSERT INTO tenant_settings (tenant_id, default_channel) VALUES (?, 'sms')`
-      )
-        .bind(tenantId)
-        .run();
-    } catch (err) {
-      console.error("oauth callback: failed to persist new tenant", err);
-      return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
-    }
+  try {
+    await env.DB.prepare(
+      `INSERT INTO tenants (servicem8_account_uuid, status, backfill_complete, backfill_cursor, installed_at)
+       VALUES (?, 'active', 0, NULL, ?)`
+    )
+      .bind(tenantId, now)
+      .run();
+    await storeTokens(env.DB, tenantId, tokens);
+    await env.DB.prepare(
+      `INSERT INTO tenant_settings (tenant_id, default_channel) VALUES (?, 'sms')`
+    )
+      .bind(tenantId)
+      .run();
+  } catch (err) {
+    console.error("oauth callback: failed to persist new tenant", err);
+    return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
   }
 
   const callbackUrl = `${url.origin}/webhooks/servicem8?tenant=${tenantId}`;
@@ -301,18 +288,29 @@ function addonErrorHtml(message) {
 //
 // There's no confirmed "whoami" API call to learn the real accountUUID right
 // at install time (see plan's open risks), so a fresh tenant row sits
-// unresolved until its first addon-callback JWT arrives. Every retried
-// install (e.g. "installation failed, please try again") creates another
-// unresolved row via handleOAuthCallback -- rather than requiring exactly one
-// to exist (which broke the very first time Phill retried install a few
-// times), pick whichever unresolved active tenant has the most recently
-// issued OAuth token as "the install ServiceM8 currently has authorized",
-// and retire the older duplicates so they can never shadow it again. This is
-// still a single-real-tenant simplification, not true multi-tenant
-// disambiguation -- must be revisited before a second real tenant installs.
+// unresolved until its first addon-callback JWT arrives -- every hit on
+// /oauth/callback creates one (see handleOAuthCallback), including reinstalls
+// of an already-known tenant, since there's no way to tell those apart from
+// a brand new business installing until this JWT arrives.
+//
+// Two cases once the real accountUuid is known:
+//  - Already resolved to an existing tenant: normally just return it. But if
+//    a *newer* unresolved row exists with fresher oauth_tokens than that
+//    tenant's, this is a reinstall/rescope -- migrate the fresh tokens onto
+//    the existing (resolved) row so its id, and everything keyed on it
+//    (due_customers, reminder_drafts, etc), stays intact, instead of leaving
+//    the fresh tokens stranded on a row nothing will ever look up again.
+//  - Not yet resolved: a genuinely new tenant (or the very first resolve for
+//    one). Pick whichever unresolved active row has the most recently issued
+//    token as "the install ServiceM8 currently has authorized" and retire
+//    the rest.
+// Known remaining gap: if two *different* brand-new installs are mid-flight
+// at the same moment, both look like unresolved candidates and whichever
+// isn't picked gets retired as a "stale duplicate" -- true concurrent-install
+// disambiguation needs the OAuth `state` param tied to a stored session,
+// which doesn't exist yet (see handleOAuthCallback's CSRF note).
 async function resolveTenantFromAccountUuid(env, accountUuid) {
   const byResolved = await env.DB.prepare("SELECT * FROM tenants WHERE resolved_account_uuid = ?").bind(accountUuid).first();
-  if (byResolved) return byResolved;
 
   const { results: candidates } = await env.DB.prepare(
     `SELECT t.* FROM tenants t
@@ -320,6 +318,28 @@ async function resolveTenantFromAccountUuid(env, accountUuid) {
      WHERE t.status = 'active' AND t.resolved_account_uuid IS NULL
      ORDER BY o.updated_at DESC`
   ).all();
+
+  if (byResolved) {
+    if (candidates && candidates.length) {
+      const freshest = candidates[0];
+      const freshTokens = await env.DB.prepare("SELECT * FROM oauth_tokens WHERE tenant_id = ?").bind(freshest.servicem8_account_uuid).first();
+      const currentTokens = await env.DB.prepare("SELECT * FROM oauth_tokens WHERE tenant_id = ?").bind(byResolved.servicem8_account_uuid).first();
+      if (freshTokens && (!currentTokens || freshTokens.updated_at > currentTokens.updated_at)) {
+        await env.DB.prepare(
+          `UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, access_token_expires_at = ?, scope = ?, updated_at = ? WHERE tenant_id = ?`
+        )
+          .bind(freshTokens.access_token, freshTokens.refresh_token, freshTokens.access_token_expires_at, freshTokens.scope, freshTokens.updated_at, byResolved.servicem8_account_uuid)
+          .run();
+      }
+      for (const stale of candidates) {
+        await env.DB.prepare("UPDATE tenants SET status = 'uninstalled', uninstalled_at = ? WHERE servicem8_account_uuid = ?")
+          .bind(Date.now(), stale.servicem8_account_uuid)
+          .run();
+      }
+    }
+    return byResolved;
+  }
+
   if (!candidates || candidates.length === 0) {
     console.error(`resolveTenantFromAccountUuid: no unresolved active tenant candidates for account ${accountUuid}`);
     return null;
@@ -425,15 +445,20 @@ async function handleDashboardDismiss(request, env) {
   }
 }
 
-// ---- Phase 1 acceptance-test debug routes ---------------------------------
+// ---- admin routes ----------------------------------------------------------
 // Standing in for the Phase 2 setup wizard, which doesn't exist yet -- these
-// let us configure category tracking and run the engine manually against
-// TCB's real account to validate correctness before building any UI.
-// Not gated by auth: acceptable only because the only tenant that exists
-// right now is TCB's own test install; must be removed or auth-gated before
-// a second real tenant or Partner Preview submission.
+// let us configure tracking rules and run the engine manually. Gated by
+// requireAdminAuth (shares the App Secret -- no separate admin credential to
+// manage) since these expose/mutate any tenant's data by uuid alone.
+
+function requireAdminAuth(request, env) {
+  const url = new URL(request.url);
+  const key = request.headers.get("X-Admin-Key") || url.searchParams.get("adminKey");
+  return key === env.SERVICEM8_APP_SECRET;
+}
 
 async function handleDebugCategories(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
@@ -450,6 +475,7 @@ async function handleDebugCategories(request, env) {
 // hand (look up an existing rule for this exact signal, update it, else
 // insert) rather than relying on ON CONFLICT.
 async function handleDebugConfigureCategory(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const { tenant, categoryUuid, badgeUuid, categoryName, intervalMonths } = await readJson(request);
   const signalType = badgeUuid ? "badge" : "category";
   const targetUuid = badgeUuid || categoryUuid;
@@ -479,6 +505,7 @@ async function handleDebugConfigureCategory(request, env) {
 }
 
 async function handleDebugRecompute(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
@@ -490,364 +517,8 @@ async function handleDebugRecompute(request, env) {
   }
 }
 
-// One-time cleanup: TCB's historical "Standard" category was a mixed bag of
-// general pest visits (the true recurring yearly service) and one-off
-// specialist jobs (fleas, bed bugs, rats, possums, termites) that were never
-// properly recategorized. Reclassifying each by hand (per Phill's review of
-// every job's description) so the due-detection engine tracking "Premium
-// Pest Treatment" reflects only genuine recurring general-pest visits.
-// Jobs with no good existing category (flea, subfloor timber, TPI, ants) are
-// deliberately left untouched -- they stay in "Standard", which is no longer
-// a tracked category, so they're correctly excluded either way.
-const PREMIUM_PEST_UUID = "97af1d3c-07ac-4aae-8862-23184055ce5b";
-const RODENT_UUID = "65374f33-5111-4411-976d-232fc24a43ab";
-const BED_BUG_UUID = "a1abb6a4-1c94-4f65-9150-2354da1a8c8b";
-const WILDLIFE_UUID = "82142727-ec9f-49e2-bd3b-231849b852eb";
-const TERMITE_MGMT_UUID = "4b0df417-bd76-44a5-b9b9-231843331c3b";
-
-const STANDARD_RECLASSIFY_MAP = {
-  "fbcc98bb-215e-4327-b30f-23052003292d": PREMIUM_PEST_UUID, // 117 Clift Crescent -- general pest service
-  "b55bfc35-2eaf-45ee-982a-23076a976c9d": PREMIUM_PEST_UUID, // 1/18 Breen Pl -- General Pest
-  "da525b59-56fe-49cb-be26-232a2727444d": PREMIUM_PEST_UUID, // 1041 Harolds Cross Rd -- General pest treatment
-  "b038f108-945d-4517-8508-235537fc0b0d": PREMIUM_PEST_UUID, // 4 Dalziel Street -- Gp-ants
-  "278a2bcf-5b5f-44c0-832b-23529bed4c5b": PREMIUM_PEST_UUID, // 1617 Burra Rd -- General Pest
-  "e1313900-2450-4052-8b7c-2344f5b9dded": PREMIUM_PEST_UUID, // 15 Boronia Crescent -- GP
-  "8110911b-8a9c-43fd-b5d2-23aa3279874b": PREMIUM_PEST_UUID, // 55 Alberga St -- Full general pest
-  "b04c1bbb-33c8-4c03-a83c-230769f4af1b": PREMIUM_PEST_UUID, // food court hyperdome -- Rodents, General Pest
-  "f4f0ec36-1f5d-48eb-b4f9-230efd22bf9d": PREMIUM_PEST_UUID, // 8 Hayward Street -- lots of spiders
-  "831f13c3-2f85-419f-9ac5-2303d49fa2cb": RODENT_UUID, // 27A Massey St -- Investigate rat infestation
-  "79fcb3c9-26dd-449d-95bd-2354d445838b": RODENT_UUID, // 80 Dumas St -- rodent in the roof
-  "2408460b-043d-4153-830a-2306fc9b942b": BED_BUG_UUID, // 120 Auburn Street Goulburn -- Bed bug inspection/treatment
-  "17b32e9c-6e88-4528-b014-23176ed79dfb": WILDLIFE_UUID, // 9 O'Rourke Pl -- Possum fell down chimney
-  "89a1a774-ce09-4a2e-92aa-23076f7ed4dd": TERMITE_MGMT_UUID, // 29 Redbox Place -- Termite inspection and Termidore recharge
-};
-
-async function handleDebugReclassifyStandard(request, env) {
-  const tenantId = new URL(request.url).searchParams.get("tenant");
-  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
-  const results = [];
-  for (const [jobUuid, categoryUuid] of Object.entries(STANDARD_RECLASSIFY_MAP)) {
-    try {
-      await updateJobCategory(env, tenantId, jobUuid, categoryUuid);
-      results.push({ jobUuid, categoryUuid, ok: true });
-    } catch (err) {
-      results.push({ jobUuid, categoryUuid, ok: false, error: String(err && err.message) });
-    }
-  }
-  return json({ results });
-}
-
-// One-time setup: fresh green-branded badges for Renewal Autopilot, distinct
-// from TCB's existing "3/6 Month Follow-up"/"1 Year Follow-up" badges so as
-// not to disturb whatever those are already used for. Only the 1-year one is
-// wired into a tracking rule for now -- see /debug/configure-category.
-// Generic one-off badge-creation test -- isolates variables (single flat
-// image, no sprite stacking, opaque or transparent) to determine whether
-// ServiceM8 auto-overlays the badge name on a plain file_name image.
-async function handleDebugCreateTestBadge(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const name = url.searchParams.get("name");
-  const fileUrl = url.searchParams.get("fileUrl");
-  if (!tenantId || !name || !fileUrl) return json({ error: "?tenant=, ?name=, ?fileUrl= required" }, { status: 400 });
-  try {
-    const uuid = await createBadge(env, tenantId, { name, fileUrl });
-    return json({ uuid, name, fileUrl, ok: true });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-// Additive bulk operation: finds every job carrying `fromBadgeUuid` and adds
-// `toBadgeUuid` alongside it (never removes the original). Used to roll the
-// new "1 year auto" badge out onto every job that already has TCB's original
-// "1 Year Follow-up" badge, so the due-detection engine's badge-based rule
-// (once pointed at the new badge) has real history from day one instead of
-// starting empty.
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Applies a badge to an explicit list of job UUIDs (POST body: { jobUuids: [...] })
-// -- used for the hand-reviewed "missing badge" backfill, where the target
-// set came from manual classification, not a badge-matching query.
-async function handleDebugApplyBadgeToJobs(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const toBadgeUuid = url.searchParams.get("toBadge");
-  if (!tenantId || !toBadgeUuid) return json({ error: "?tenant= and ?toBadge= required" }, { status: 400 });
-  const { jobUuids } = await readJson(request);
-  if (!Array.isArray(jobUuids) || !jobUuids.length) return json({ error: "jobUuids array required in body" }, { status: 400 });
-
-  let updated = 0;
-  let alreadyHad = 0;
-  const errors = [];
-  for (const jobUuid of jobUuids) {
-    try {
-      const job = await getJob(env, tenantId, jobUuid);
-      const current = parseBadges(job.badges);
-      if (current.includes(toBadgeUuid)) {
-        alreadyHad++;
-      } else {
-        await updateJobBadges(env, tenantId, jobUuid, [...current, toBadgeUuid]);
-        updated++;
-      }
-    } catch (err) {
-      errors.push({ jobUuid, error: String(err && err.message) });
-    }
-    await sleep(350);
-  }
-  return json({ total: jobUuids.length, updated, alreadyHad, errors });
-}
-
-async function handleDebugApplyBadgeToMatching(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const fromBadgeUuid = url.searchParams.get("fromBadge");
-  const toBadgeUuid = url.searchParams.get("toBadge");
-  // Optional cap for controlled testing before running the full batch --
-  // ServiceM8 rate-limits API calls per minute, so this also throttles with
-  // a delay between writes rather than firing all of them back to back.
-  const limit = Number(url.searchParams.get("limit")) || Infinity;
-  if (!tenantId || !fromBadgeUuid || !toBadgeUuid) {
-    return json({ error: "?tenant=, ?fromBadge=, ?toBadge= required" }, { status: 400 });
-  }
-  try {
-    const jobs = (await listAllJobsAnyStatus(env, tenantId)) || [];
-    const matching = jobs.filter((j) => parseBadges(j.badges).includes(fromBadgeUuid)).slice(0, limit);
-    let updated = 0;
-    let alreadyHad = 0;
-    const errors = [];
-    for (const job of matching) {
-      const current = parseBadges(job.badges);
-      if (current.includes(toBadgeUuid)) {
-        alreadyHad++;
-        continue;
-      }
-      try {
-        await updateJobBadges(env, tenantId, job.uuid, [...current, toBadgeUuid]);
-        updated++;
-      } catch (err) {
-        errors.push({ jobUuid: job.uuid, error: String(err && err.message) });
-      }
-      await sleep(350); // stay comfortably under ServiceM8's per-minute limit
-    }
-    return json({ totalMatching: matching.length, processed: matching.length, updated, alreadyHad, errors });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugDeleteBadgeByUuid(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const uuid = url.searchParams.get("uuid");
-  if (!tenantId || !uuid) return json({ error: "?tenant= and ?uuid= required" }, { status: 400 });
-  try {
-    await deleteBadge(env, tenantId, uuid);
-    return json({ uuid, ok: true });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugTestSms(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const to = url.searchParams.get("to");
-  const jobUuid = url.searchParams.get("jobUuid");
-  if (!tenantId || !to) return json({ error: "?tenant= and ?to= required" }, { status: 400 });
-  try {
-    const result = await sendPlatformSms(env, tenantId, {
-      to,
-      message: "Test message from Renewal Autopilot -- ignore, verifying send mechanics.",
-      regardingJobUuid: jobUuid || undefined,
-    });
-    return json({ ok: true, result });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugCreateContact(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const companyUuid = url.searchParams.get("companyUuid");
-  const first = url.searchParams.get("first");
-  const mobile = url.searchParams.get("mobile");
-  if (!tenantId || !companyUuid || !first || !mobile) {
-    return json({ error: "?tenant=, ?companyUuid=, ?first=, ?mobile= required" }, { status: 400 });
-  }
-  try {
-    await createCompanyContact(env, tenantId, { companyUuid, first, mobile, isPrimary: true });
-    return json({ ok: true });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugCreateBadges(request, env) {
-  const tenantId = new URL(request.url).searchParams.get("tenant");
-  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
-  const origin = new URL(request.url).origin;
-  const fileUrl = `${origin}/assets/images/badge-green-sprite.png`;
-  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
-  const results = [];
-  for (const name of names) {
-    try {
-      const uuid = await createBadge(env, tenantId, { name, fileUrl });
-      results.push({ name, uuid, ok: true });
-    } catch (err) {
-      results.push({ name, ok: false, error: String(err && err.message) });
-    }
-  }
-  return json({ results });
-}
-
-// One-time fix: the first sprite was square/dark-green; ServiceM8 appears to
-// copy the image at creation time rather than proxying it live, so pointing
-// existing badges at the same URL again wouldn't necessarily refresh what's
-// shown -- update to the new versioned filename instead.
-async function handleDebugUpdateBadgeIcons(request, env) {
-  const tenantId = new URL(request.url).searchParams.get("tenant");
-  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
-  const origin = new URL(request.url).origin;
-  // Per-badge labeled sprite -- plain color + text, no icon glyph, matching
-  // the "CHASE PAYMENT" style Phill pointed to (a solid color circle with
-  // just text, made via ServiceM8's own "no icon" picker option).
-  const fileByName = {
-    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month-v3.png`,
-    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month-v3.png`,
-    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year-v3.png`,
-  };
-  try {
-    const badges = (await listBadges(env, tenantId)) || [];
-    const results = [];
-    for (const [name, fileUrl] of Object.entries(fileByName)) {
-      const badge = badges.find((b) => b.name === name);
-      if (!badge) {
-        results.push({ name, ok: false, error: "badge not found" });
-        continue;
-      }
-      try {
-        await updateBadge(env, tenantId, badge.uuid, { fileUrl });
-        results.push({ name, uuid: badge.uuid, fileUrl, ok: true });
-      } catch (err) {
-        results.push({ name, uuid: badge.uuid, ok: false, error: String(err && err.message) });
-      }
-    }
-    return json({ results });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-// Retires the badly-styled first-attempt custom-image badges -- ServiceM8's
-// icon+color picker is UI-only (see 2026-08-03 research), so the file_name
-// custom-image approach was the wrong path entirely; the tenant creates
-// badges natively instead and tells the app their name.
-async function handleDebugDeleteRenewalBadges(request, env) {
-  const tenantId = new URL(request.url).searchParams.get("tenant");
-  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
-  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
-  try {
-    const badges = (await listBadges(env, tenantId)) || [];
-    const results = [];
-    for (const name of names) {
-      const badge = badges.find((b) => b.name === name);
-      if (!badge) continue;
-      try {
-        await deleteBadge(env, tenantId, badge.uuid);
-        results.push({ name, uuid: badge.uuid, ok: true });
-      } catch (err) {
-        results.push({ name, uuid: badge.uuid, ok: false, error: String(err && err.message) });
-      }
-    }
-    return json({ results });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugRaw(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const path = url.searchParams.get("path");
-  if (!tenantId || !path) return json({ error: "?tenant= and ?path= required" }, { status: 400 });
-  try {
-    const data = await rawGet(env, tenantId, path);
-    return json({ data });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugSampleJobs(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const categoryUuid = url.searchParams.get("category");
-  if (!tenantId || !categoryUuid) return json({ error: "?tenant= and ?category= required" }, { status: 400 });
-  try {
-    const jobs = await listCompletedJobsForCategory(env, tenantId, categoryUuid);
-    const limit = Number(url.searchParams.get("limit")) || 8;
-    const sample = (jobs || []).slice(0, limit).map((j) => ({
-      uuid: j.uuid,
-      job_address: j.job_address,
-      job_description: j.job_description,
-      completion_date: j.completion_date,
-      company_uuid: j.company_uuid,
-    }));
-    return json({ total: (jobs || []).length, sample });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugCategoryBreakdown(request, env) {
-  const tenantId = new URL(request.url).searchParams.get("tenant");
-  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
-  try {
-    const [jobs, categories] = await Promise.all([listAllCompletedJobs(env, tenantId), listCategories(env, tenantId)]);
-    const nameByUuid = {};
-    for (const c of categories || []) nameByUuid[c.uuid] = c.name;
-    const counts = {};
-    for (const j of jobs || []) {
-      const key = j.category_uuid ? nameByUuid[j.category_uuid] || j.category_uuid : "(no category)";
-      counts[key] = (counts[key] || 0) + 1;
-    }
-    return json({ totalCompletedJobs: (jobs || []).length, counts });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugOpenJobs(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const companyUuid = url.searchParams.get("company");
-  if (!tenantId || !companyUuid) return json({ error: "?tenant= and ?company= required" }, { status: 400 });
-  try {
-    const jobs = await listOpenJobsForCompany(env, tenantId, companyUuid);
-    return json({ jobs: (jobs || []).map((j) => ({ uuid: j.uuid, status: j.status, category_uuid: j.category_uuid, job_address: j.job_address, date: j.date })) });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
-async function handleDebugContact(request, env) {
-  const url = new URL(request.url);
-  const tenantId = url.searchParams.get("tenant");
-  const companyUuid = url.searchParams.get("company");
-  if (!tenantId || !companyUuid) return json({ error: "?tenant= and ?company= required" }, { status: 400 });
-  try {
-    const contact = await getPrimaryContact(env, tenantId, companyUuid);
-    return json({ contact });
-  } catch (err) {
-    return json({ error: String(err && err.message) }, { status: 502 });
-  }
-}
-
 async function handleDebugDueCustomers(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   const { results } = await env.DB.prepare(
@@ -886,21 +557,6 @@ export default {
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
-    if (pathname === "/debug/contact" && method === "GET") return handleDebugContact(request, env);
-    if (pathname === "/debug/category-breakdown" && method === "GET") return handleDebugCategoryBreakdown(request, env);
-    if (pathname === "/debug/sample-jobs" && method === "GET") return handleDebugSampleJobs(request, env);
-    if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
-    if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
-    if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
-    if (pathname === "/debug/create-test-badge" && method === "POST") return handleDebugCreateTestBadge(request, env);
-    if (pathname === "/debug/create-contact" && method === "POST") return handleDebugCreateContact(request, env);
-    if (pathname === "/debug/test-sms" && method === "POST") return handleDebugTestSms(request, env);
-    if (pathname === "/debug/delete-badge" && method === "POST") return handleDebugDeleteBadgeByUuid(request, env);
-    if (pathname === "/debug/apply-badge-to-matching" && method === "POST") return handleDebugApplyBadgeToMatching(request, env);
-    if (pathname === "/debug/apply-badge-to-jobs" && method === "POST") return handleDebugApplyBadgeToJobs(request, env);
-    if (pathname === "/debug/update-badge-icons" && method === "POST") return handleDebugUpdateBadgeIcons(request, env);
-    if (pathname === "/debug/delete-renewal-badges" && method === "POST") return handleDebugDeleteRenewalBadges(request, env);
-    if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });

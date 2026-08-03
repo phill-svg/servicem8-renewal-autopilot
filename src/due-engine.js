@@ -10,69 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listBadges, createBadge, listCategories, listNotesForJob } from "./servicem8-api.js";
-
-// Renewal Autopilot's own green-branded badges, created fresh in every
-// installing tenant's account rather than reusing whatever follow-up badges
-// they already have (avoids disturbing an existing workflow) -- see
-// 2026-08-03 decision. Only the 1-year one gets auto-wired into a tracking
-// rule for now; 3/6-month are created for future use but left unconfigured.
-// Plain color + text, no icon glyph -- matches the "CHASE PAYMENT" style
-// badge Phill made natively in ServiceM8 (their own "no icon" picker option),
-// each with its cadence baked into the image as text since ServiceM8 doesn't
-// overlay the badge name as text on custom-image badges the way it does for
-// its own icon-picker badges.
-const RENEWAL_BADGES = [
-  { name: "Renewal Autopilot - 3 Month", file: "badge-3month-v3.png" },
-  { name: "Renewal Autopilot - 6 Month", file: "badge-6month-v3.png" },
-  { name: "Renewal Autopilot - 1 Year", file: "badge-1year-v3.png" },
-];
-const AUTO_TRACKED_BADGE_NAME = "Renewal Autopilot - 1 Year";
-const AUTO_TRACKED_INTERVAL_MONTHS = 12;
-
-// Idempotent: run on every install/reinstall. Looks up existing badges by
-// exact name first so a reinstall never creates duplicates, then ensures the
-// 1-year badge has a default tracking rule if this tenant doesn't have one
-// yet (does not overwrite a rule the tenant may have since customized).
-export async function ensureRenewalBadgesAndDefaultRule(env, tenantId, origin) {
-  let existing = [];
-  try {
-    existing = (await listBadges(env, tenantId)) || [];
-  } catch (err) {
-    console.error(`ensureRenewalBadges: failed to list existing badges for tenant ${tenantId}`, err);
-  }
-  const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
-
-  const uuidByName = {};
-  for (const { name, file } of RENEWAL_BADGES) {
-    if (existingByName.has(name)) {
-      uuidByName[name] = existingByName.get(name);
-      continue;
-    }
-    try {
-      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl: `${origin}/assets/images/${file}` });
-    } catch (err) {
-      console.error(`ensureRenewalBadges: failed to create badge "${name}" for tenant ${tenantId}`, err);
-    }
-  }
-
-  const trackedBadgeUuid = uuidByName[AUTO_TRACKED_BADGE_NAME];
-  if (!trackedBadgeUuid) return;
-
-  const alreadyConfigured = await env.DB.prepare(
-    "SELECT id FROM category_config WHERE tenant_id = ? AND signal_type = 'badge' AND servicem8_badge_uuid = ?"
-  )
-    .bind(tenantId, trackedBadgeUuid)
-    .first();
-  if (alreadyConfigured) return;
-
-  await env.DB.prepare(
-    `INSERT INTO category_config (id, tenant_id, signal_type, servicem8_badge_uuid, category_name_cache, interval_months)
-     VALUES (?, ?, 'badge', ?, ?, ?)`
-  )
-    .bind(randomId(), tenantId, trackedBadgeUuid, AUTO_TRACKED_BADGE_NAME, AUTO_TRACKED_INTERVAL_MONTHS)
-    .run();
-}
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob } from "./servicem8-api.js";
 
 // Dispatches a tracking rule to the right job-fetch strategy. See
 // schema.sql's category_config comment for why a rule can be either kind.
