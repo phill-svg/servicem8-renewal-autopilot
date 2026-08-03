@@ -7,7 +7,8 @@
 -- accountUUID once resolved -- see src/servicem8-oauth.js's provisional-row
 -- handling for how this is first created before the real UUID is known.
 CREATE TABLE IF NOT EXISTS tenants (
-  servicem8_account_uuid TEXT PRIMARY KEY,
+  servicem8_account_uuid TEXT PRIMARY KEY, -- our own generated tenant id (see src/index.js's OAuth callback) -- NOT ServiceM8's real account UUID, despite the name
+  resolved_account_uuid  TEXT,             -- ServiceM8's real accountUUID, learned from the first addon-callback JWT (src/addon.js) -- null until the job-card action is opened at least once
   account_name           TEXT,
   status                 TEXT NOT NULL DEFAULT 'active', -- active | suspended | uninstalled
   backfill_complete      INTEGER NOT NULL DEFAULT 0,
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   installed_at           INTEGER NOT NULL,
   uninstalled_at         INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_tenants_resolved_account ON tenants(resolved_account_uuid);
 
 -- OAuth2 access/refresh tokens, one row per tenant. refresh_token rotates on
 -- every use -- always overwrite, never append. See getValidAccessToken() in

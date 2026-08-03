@@ -4,11 +4,13 @@
 // due-detection engine. No staff-facing UI or real message sending yet
 // (Phase 2 -- src/addon.js, src/messaging.js).
 
-import { randomId, json, escapeHtml } from "./util.js";
+import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob } from "./servicem8-api.js";
+import { getJob, listCategories } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
+import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
+import { renderDashboardHtml, approveAndSendDraft } from "./dashboard.js";
 
 // ---- install / OAuth2 ------------------------------------------------
 
@@ -223,6 +225,186 @@ async function runBackfillAndRefreshSweep(env) {
   }
 }
 
+// ---- ServiceM8 Add-on: job-card button -> standalone dashboard -----------
+//
+// Same job-card-action mechanism as tcb-customer-portal's "Approve Forms for
+// Portal" (confirmed working against the real account -- see the "Addons"
+// flyout menu on a job card), registered in addon-manifest.json under
+// "actions". Unlike that add-on, the callback doesn't render a form inline --
+// it immediately opens the full due/renewal queue as a standalone page in a
+// new tab (src/dashboard.js), authenticated by a short-lived token instead
+// of a login system.
+
+function addonResponse(html) {
+  return new Response(JSON.stringify({ eventResponse: html }), {
+    status: 200,
+    headers: { "Content-Type": "application/json", ...corsHeaders() },
+  });
+}
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
+
+function addonErrorHtml(message) {
+  return `<!doctype html><html><body style="font-family:sans-serif;padding:1.5rem;color:#c41613;">${escapeHtml(message)}</body></html>`;
+}
+
+// Resolves our internal tenant_id from the addon callback JWT's real
+// ServiceM8 accountUUID. Opportunistically backfills tenants.resolved_account_uuid
+// the first time this fires for a tenant. The "only one tenant exists"
+// fallback below is a deliberate simplification for Phase 1/2 testing with a
+// single real tenant (TCB) -- it MUST be removed before a second tenant
+// installs, since it would silently misattribute the dashboard to the wrong
+// account otherwise.
+async function resolveTenantFromAccountUuid(env, accountUuid) {
+  const byResolved = await env.DB.prepare("SELECT * FROM tenants WHERE resolved_account_uuid = ?").bind(accountUuid).first();
+  if (byResolved) return byResolved;
+
+  const { results: allTenants } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active'").all();
+  if ((allTenants || []).length !== 1) {
+    console.error(`resolveTenantFromAccountUuid: cannot uniquely resolve tenant for account ${accountUuid} -- ${(allTenants || []).length} active tenants on file`);
+    return null;
+  }
+  const only = allTenants[0];
+  await env.DB.prepare("UPDATE tenants SET resolved_account_uuid = ? WHERE servicem8_account_uuid = ?")
+    .bind(accountUuid, only.servicem8_account_uuid)
+    .run();
+  return only;
+}
+
+function dashboardRedirectHtml(dashboardUrl) {
+  return `<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="https://platform.servicem8.com/sdk/1.0/sdk.css" />
+<script src="https://platform.servicem8.com/sdk/1.0/sdk.js"></script>
+</head>
+<body style="font-family:sans-serif;padding:1.5rem;text-align:center;">
+  <p>Opening Renewal Autopilot in a new tab&hellip;</p>
+  <p><a id="fallback" href="${escapeHtml(dashboardUrl)}" target="_blank" rel="noopener" style="color:#2b2b30;">Click here if it didn't open automatically</a></p>
+  <script>
+    try {
+      var smClient = (typeof SMClient !== 'undefined') ? SMClient.init() : null;
+      if (smClient && smClient.resizeWindow) smClient.resizeWindow(420, 200);
+    } catch (err) {}
+    window.open(${JSON.stringify(dashboardUrl)}, '_blank');
+  </script>
+</body></html>`;
+}
+
+async function handleAddonQueue(request, env) {
+  const jwt = await request.text();
+  // Every response here is deliberately HTTP 200, even on failure -- same
+  // reasoning as tcb-customer-portal: ServiceM8's relay discards non-2xx
+  // callback responses and renders a blank modal with no error text instead.
+  const payload = await verifyAddonJwt(env.SERVICEM8_APP_SECRET, jwt);
+  if (!payload) return addonResponse(addonErrorHtml("Could not verify this request."));
+
+  const accountUuid = payload?.auth?.accountUUID;
+  if (!accountUuid) return addonResponse(addonErrorHtml("No account information was provided."));
+
+  const tenant = await resolveTenantFromAccountUuid(env, accountUuid);
+  if (!tenant) return addonResponse(addonErrorHtml("Could not identify your account. Please reinstall the add-on."));
+
+  const origin = new URL(request.url).origin;
+  const token = await createDashboardToken(env.SERVICEM8_APP_SECRET, tenant.servicem8_account_uuid);
+  const dashboardUrl = `${origin}/dashboard?token=${encodeURIComponent(token)}`;
+  return addonResponse(dashboardRedirectHtml(dashboardUrl));
+}
+
+function handleAddonPreflight() {
+  return new Response(null, { status: 204, headers: corsHeaders() });
+}
+
+async function handleDashboard(request, env) {
+  const token = new URL(request.url).searchParams.get("token");
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) {
+    return new Response(addonErrorHtml("This link has expired. Please reopen Renewal Autopilot from a job card in ServiceM8."), {
+      status: 401,
+      headers: { "Content-Type": "text/html" },
+    });
+  }
+  const html = await renderDashboardHtml(env, tenantId, token);
+  return new Response(html, { headers: { "Content-Type": "text/html" } });
+}
+
+async function handleDashboardApprove(request, env) {
+  const { token, draftId } = await readJson(request);
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
+  if (!draftId) return json({ error: "draftId required" }, { status: 400 });
+
+  try {
+    await approveAndSendDraft(env, tenantId, draftId);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`dashboard approve failed for tenant ${tenantId}, draft ${draftId}`, err);
+    return json({ error: "could not send this reminder right now" }, { status: 502 });
+  }
+}
+
+// ---- Phase 1 acceptance-test debug routes ---------------------------------
+// Standing in for the Phase 2 setup wizard, which doesn't exist yet -- these
+// let us configure category tracking and run the engine manually against
+// TCB's real account to validate correctness before building any UI.
+// Not gated by auth: acceptable only because the only tenant that exists
+// right now is TCB's own test install; must be removed or auth-gated before
+// a second real tenant or Partner Preview submission.
+
+async function handleDebugCategories(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  try {
+    const categories = await listCategories(env, tenantId);
+    return json({ categories });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
+async function handleDebugConfigureCategory(request, env) {
+  const { tenant, categoryUuid, categoryName, intervalMonths } = await readJson(request);
+  if (!tenant || !categoryUuid || !intervalMonths) {
+    return json({ error: "tenant, categoryUuid, intervalMonths required" }, { status: 400 });
+  }
+  await env.DB.prepare(
+    `INSERT INTO category_config (id, tenant_id, servicem8_category_uuid, category_name_cache, interval_months)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(tenant_id, servicem8_category_uuid) DO UPDATE SET
+       interval_months = excluded.interval_months, category_name_cache = excluded.category_name_cache`
+  )
+    .bind(randomId(), tenant, categoryUuid, categoryName || "", intervalMonths)
+    .run();
+  return json({ ok: true });
+}
+
+async function handleDebugRecompute(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  try {
+    const result = await recomputeAllCategoriesForTenant(env, tenantId);
+    return json(result);
+  } catch (err) {
+    return json({ error: String(err && err.message), stack: err && err.stack }, { status: 502 });
+  }
+}
+
+async function handleDebugDueCustomers(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM due_customers WHERE tenant_id = ? ORDER BY bucket, last_completed_at"
+  )
+    .bind(tenantId)
+    .all();
+  return json({ dueCustomers: results || [] });
+}
+
 // ---- router --------------------------------------------------------------
 
 export default {
@@ -234,6 +416,16 @@ export default {
     if (pathname === "/install" && method === "GET") return handleInstallStart(request, env);
     if (pathname === "/oauth/callback" && method === "GET") return handleOAuthCallback(request, env, ctx);
     if (pathname === "/webhooks/servicem8" && method === "POST") return handleWebhook(request, env, ctx);
+
+    if (pathname === "/addon/queue" && method === "POST") return handleAddonQueue(request, env);
+    if (pathname === "/addon/queue" && method === "OPTIONS") return handleAddonPreflight();
+    if (pathname === "/dashboard" && method === "GET") return handleDashboard(request, env);
+    if (pathname === "/dashboard/approve" && method === "POST") return handleDashboardApprove(request, env);
+
+    if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
+    if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
+    if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
+    if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });

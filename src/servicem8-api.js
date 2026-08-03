@@ -107,16 +107,21 @@ export async function getPrimaryContact(env, tenantId, companyUuid) {
 
 // ---- webhook subscription management ---------------------------------
 //
-// Endpoint and form-urlencoded shape confirmed working in
-// tcb-customer-portal (registerServiceM8Webhook, company.created/updated,
-// X-API-Key auth). Using the tenant's OAuth bearer token here instead of an
-// API key -- unconfirmed whether ServiceM8 accepts OAuth bearer auth on this
-// specific endpoint the same way; verify in Phase 1 against TCB's own
-// account before relying on it for other tenants.
-
+// CORRECTED 2026-08-02 against a live 400 during Phase 1 TCB install
+// testing: ServiceM8 actually has two distinct endpoints --
+// /webhook_subscriptions/object (field-level changes on an object type --
+// what tcb-customer-portal's company.created/updated registration is really
+// hitting, confirmed via developer.servicem8.com/reference/post_object_webhook_subscription)
+// and /webhook_subscriptions/event (named business events, e.g.
+// job.completed -- developer.servicem8.com/reference/post_event_webhook_subscription).
+// The bare /webhook_subscriptions path used here originally is neither --
+// it produced "webhook_subscriptions is not an authorised object type",
+// which was a misleading symptom (it read like a scope/permission error,
+// it was actually just the wrong URL). Confirmed request fields from the
+// official reference: event, callback_url, unique_id (optional).
 export async function registerWebhook(env, tenantId, { event, callbackUrl }) {
   const uniqueId = `renewal-autopilot:${tenantId}:${event}`;
-  const res = await sm8PostForm(env, tenantId, `/webhook_subscriptions`, {
+  const res = await sm8PostForm(env, tenantId, `/webhook_subscriptions/event`, {
     event,
     callback_url: callbackUrl,
     unique_id: uniqueId,
