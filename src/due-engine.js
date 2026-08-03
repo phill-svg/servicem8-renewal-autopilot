@@ -271,16 +271,29 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   }
 }
 
+async function insertDraftIfMissing(env, tenantId, dueCustomerId, channel, round, subject, body) {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_subject, draft_body, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+  )
+    .bind(randomId(), tenantId, dueCustomerId, channel, round, subject, body, Date.now())
+    .run();
+}
+
 // Creates draft reminders the first time a due_customers row enters an
-// actionable bucket -- UNIQUE(due_customer_id, channel) makes re-running the
-// engine idempotent, so this never spams duplicate drafts on repeat runs.
-// Draft content is a sensible default until the tenant configures a real
-// template in the Phase 2 setup wizard (tenant_settings.sms_template).
+// actionable bucket -- UNIQUE(due_customer_id, channel, round) makes
+// re-running the engine idempotent, so this never spams duplicate drafts on
+// repeat runs. Draft content is a sensible default until the tenant
+// configures a real template in the Phase 2 setup wizard
+// (tenant_settings.sms_template).
 //
 // Creates a draft for BOTH sms and email whenever the corresponding contact
 // info exists, rather than only whichever channel tenant_settings.default_channel
 // picks -- staff choose which one(s) to actually approve & send per customer
 // in the dashboard, not locked into one channel account-wide.
+//
+// This is always round 1 -- the one staff send manually. Rounds 2/3 are the
+// auto-generated follow-ups, see generateFollowUpDraftsForTenant below.
 async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
@@ -297,30 +310,87 @@ async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   // far more natural than "Hi Sarah Lim" in an actual reminder.
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
 
-  const channels = [];
-  if (dueCustomer.contact_phone_cache) channels.push("sms");
-  if (dueCustomer.contact_email_cache) channels.push("email");
+  if (dueCustomer.contact_phone_cache) {
+    const body = (settings?.sms_template || DEFAULT_SMS).replace("{{name}}", firstName);
+    await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body);
+  }
+  if (dueCustomer.contact_email_cache) {
+    const subject = settings?.email_subject_template || "Time for your next pest treatment";
+    const body = (settings?.email_body_template || DEFAULT_EMAIL_BODY).replace("{{name}}", firstName);
+    await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, subject, body);
+  }
+}
 
-  for (const channel of channels) {
-    const body =
-      channel === "sms"
-        ? (settings?.sms_template || DEFAULT_SMS).replace("{{name}}", firstName)
-        : (settings?.email_body_template || DEFAULT_EMAIL_BODY).replace("{{name}}", firstName);
+// Auto-generated follow-up rounds, confirmed with the user 2026-08-04: round
+// 1 is always sent manually; if it's actioned and the customer is still
+// coming due, round 2 auto-drafts once within 5 days of the due date, and
+// round 3 (the last one) auto-drafts once within 2 days of the due date --
+// ordered by lead time (5 then 2) so round 3 always lands closer to the due
+// date than round 2, regardless of which number the user calls it.
+const FOLLOWUP_LEAD_DAYS = { 2: 5, 3: 2 };
 
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, draft_subject, draft_body, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
-    )
-      .bind(
-        randomId(),
-        tenantId,
-        dueCustomerId,
-        channel,
-        channel === "email" ? settings?.email_subject_template || "Time for your next pest treatment" : null,
-        body,
-        Date.now()
-      )
-      .run();
+const FOLLOWUP_TEMPLATES = {
+  2: {
+    sms: "Hi {{name}}, just a friendly follow-up -- your pest treatment is coming up due. Reply here or give us a call to lock in a time!",
+    emailSubject: "Following up -- your pest treatment is due soon",
+    email:
+      "Hi {{name}},\n\nJust following up on your upcoming pest treatment -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
+  },
+  3: {
+    sms: "Hi {{name}}, final reminder -- your pest treatment is due very soon. Reply here or call us to book before it lapses!",
+    emailSubject: "Final reminder -- your pest treatment is due",
+    email:
+      "Hi {{name}},\n\nThis is a final reminder that your pest treatment is due very soon.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
+  },
+};
+
+async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMonths) {
+  const round = dueCustomer.reminder_round;
+  const leadDays = FOLLOWUP_LEAD_DAYS[round];
+  if (!leadDays) return; // round 1 (not sent yet) or round 4+ (sequence already exhausted)
+
+  const completedAt = parseServiceM8Date(dueCustomer.last_completed_at);
+  if (!completedAt) return;
+  const dueDate = addMonths(completedAt, intervalMonths);
+  const triggerFrom = addDays(dueDate, -leadDays);
+  if (new Date() < triggerFrom) return; // not time yet for this round
+
+  const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
+  const tmpl = FOLLOWUP_TEMPLATES[round];
+
+  if (dueCustomer.contact_phone_cache) {
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "sms", round, null, tmpl.sms.replace("{{name}}", firstName));
+  }
+  if (dueCustomer.contact_email_cache) {
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "email", round, tmpl.emailSubject, tmpl.email.replace("{{name}}", firstName));
+  }
+}
+
+// Called from the nightly cron alongside recomputeAllCategoriesForTenant.
+// Only considers customers already mid-sequence (reminder_round 2 or 3) --
+// round 1 is created by upsertJobsAsDueCandidates/maybeCreateReminderDraft
+// when a customer first becomes due, not here. Naturally stops the sequence
+// for a customer who's since become suppressed (rebooked) or been dismissed,
+// since both are filtered out of the WHERE clause below.
+export async function generateFollowUpDraftsForTenant(env, tenantId) {
+  const { results: candidates } = await env.DB.prepare(
+    `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL AND reminder_round IN (2, 3)`
+  )
+    .bind(tenantId)
+    .all();
+  if (!candidates || !candidates.length) return;
+
+  const { results: rules } = await env.DB.prepare("SELECT * FROM category_config WHERE tenant_id = ?").bind(tenantId).all();
+  const intervalByRuleId = new Map((rules || []).map((r) => [r.id, r.interval_months]));
+
+  for (const dueCustomer of candidates) {
+    const intervalMonths = intervalByRuleId.get(dueCustomer.category_config_id);
+    if (!intervalMonths) continue;
+    try {
+      await maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMonths);
+    } catch (err) {
+      console.error(`due-engine: follow-up draft generation failed for due_customer ${dueCustomer.id}`, err);
+    }
   }
 }
 

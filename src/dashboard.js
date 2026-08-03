@@ -97,11 +97,16 @@ export async function renderDashboardHtml(env, tenantId, token) {
         </div>`;
       }
 
-      // Fully handled (had drafts, none left pending) moves to the separate
-      // "Already contacted" section below instead of cluttering the main
+      // Fully handled (had drafts, none left pending) moves to one of the
+      // "Contacted N" sections below instead of cluttering the main
       // actionable list -- staff shouldn't have to re-check something with
-      // nothing left to do.
+      // nothing left to do. Which section is driven by reminder_round (how
+      // many rounds have actually been sent so far), not just draft count,
+      // so a customer waiting on their auto-generated round-2 follow-up
+      // shows as "Contacted 1", not lumped in with someone on their last
+      // round -- see src/due-engine.js's generateFollowUpDraftsForTenant.
       const alreadyContacted = drafts.length > 0 && !pendingChannels.length;
+      const contactedRound = Math.min(Math.max((r.reminder_round || 1) - 1, 1), 3);
 
       const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(r.bucket)}" style="background:${s.bg};border-left:4px solid ${s.border}">
         <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
@@ -117,11 +122,30 @@ export async function renderDashboardHtml(env, tenantId, token) {
           <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
         </td>
       </tr>`;
-      return { html, alreadyContacted };
+      return { html, alreadyContacted, contactedRound };
     });
 
   const rows = allRowsData.filter((r) => !r.alreadyContacted).map((r) => r.html).join("\n");
-  const contactedRows = allRowsData.filter((r) => r.alreadyContacted).map((r) => r.html).join("\n");
+  const contactedByRound = { 1: [], 2: [], 3: [] };
+  allRowsData.filter((r) => r.alreadyContacted).forEach((r) => contactedByRound[r.contactedRound].push(r.html));
+  const CONTACTED_LABELS = {
+    1: "waiting on follow-up reminder",
+    2: "waiting on final reminder",
+    3: "final reminder sent",
+  };
+  const contactedSectionsHtml = [1, 2, 3]
+    .map((n) => {
+      const list = contactedByRound[n];
+      if (!list.length) return "";
+      return `<details style="margin-top:16px;">
+  <summary style="cursor:pointer;font-size:13px;color:#666;padding:8px 0;">Contacted ${n} (${list.length}) -- ${CONTACTED_LABELS[n]}</summary>
+  <table style="margin-top:8px;">
+  <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
+  <tbody>${list.join("\n")}</tbody>
+  </table>
+</details>`;
+    })
+    .join("\n");
 
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
@@ -163,17 +187,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </table>
 <div id="empty-filtered">No customers due for this service.</div>
 
-${
-  contactedRows
-    ? `<details style="margin-top:24px;">
-  <summary style="cursor:pointer;font-size:13px;color:#666;padding:8px 0;">Already contacted (${allRowsData.filter((r) => r.alreadyContacted).length}) -- reminders sent, nothing left to do</summary>
-  <table style="margin-top:8px;">
-  <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
-  <tbody>${contactedRows}</tbody>
-  </table>
-</details>`
-    : ""
-}
+${contactedSectionsHtml}
 <script>
   var filterSelect = document.getElementById('service-filter');
   var allRows = Array.prototype.slice.call(document.querySelectorAll('#due-table tbody tr[data-service]'));
@@ -273,6 +287,20 @@ export async function dismissDueCustomer(env, tenantId, dueCustomerId) {
     .run();
 }
 
+// Advances due_customers.reminder_round past whichever round was just sent
+// (round 1 sent -> round 2 next, etc) and records when, so the follow-up
+// generator (src/due-engine.js) knows this customer is mid-sequence. The
+// CASE guard means re-sending an old round (shouldn't normally happen) never
+// regresses a round that's already moved further along.
+async function advanceReminderRound(env, dueCustomerId, sentRound) {
+  const nextRound = sentRound + 1;
+  await env.DB.prepare(
+    `UPDATE due_customers SET reminder_round = CASE WHEN ? > reminder_round THEN ? ELSE reminder_round END, last_reminder_sent_at = ? WHERE id = ?`
+  )
+    .bind(nextRound, nextRound, Date.now(), dueCustomerId)
+    .run();
+}
+
 // editedBody: staff can revise the draft text in the dashboard textarea
 // before sending -- when present (and non-empty after trimming) it's what
 // actually gets sent, and it's persisted onto the draft row so the record
@@ -311,12 +339,14 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
       .bind(body, Date.now(), Date.now(), draftId)
       .run();
+    await advanceReminderRound(env, draft.due_customer_id, draft.round);
   } catch (err) {
     const message = String(err && err.message);
     if (message.includes("has already been sent")) {
       await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
         .bind(body, Date.now(), Date.now(), draftId)
         .run();
+      await advanceReminderRound(env, draft.due_customer_id, draft.round);
       return;
     }
     await env.DB.prepare("UPDATE reminder_drafts SET status = 'failed', draft_body = ?, error = ?, reviewed_at = ? WHERE id = ?")

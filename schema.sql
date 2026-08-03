@@ -82,6 +82,16 @@ CREATE TABLE IF NOT EXISTS due_customers (
   contact_email_cache      TEXT,
   contact_phone_cache      TEXT,
   computed_at              INTEGER NOT NULL,
+  -- Follow-up sequence state (2026-08-04): reminder_round is "the next round
+  -- not yet sent" -- starts at 1 (nothing sent), becomes 2 once round 1 is
+  -- sent, 3 once round 2 is sent, 4 once round 3 (the last one) is sent.
+  -- Bumped in src/dashboard.js's approveAndSendDraft. Auto-generation of
+  -- round 2/3 drafts (src/due-engine.js's generateFollowUpDraftsForTenant)
+  -- stops on its own once suppressed_reason or dismissed_at is set, so the
+  -- sequence auto-stops if the customer becomes suppressed or gets dismissed
+  -- -- no separate "cancelled" state needed.
+  reminder_round           INTEGER NOT NULL DEFAULT 1,
+  last_reminder_sent_at    INTEGER,
   UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);
@@ -89,11 +99,16 @@ CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tena
 -- Draft reminders awaiting staff approval in the embedded queue UI
 -- (src/addon.js). Never sent automatically -- status only moves to
 -- approved_sending/sent via an explicit staff action, see src/messaging.js.
+-- round: 1 = the initial manually-sent reminder, 2/3 = auto-generated
+-- follow-ups (see due_customers.reminder_round above). UNIQUE includes round
+-- so a customer can have one draft per channel *per round* instead of just
+-- one ever.
 CREATE TABLE IF NOT EXISTS reminder_drafts (
   id                       TEXT PRIMARY KEY,
   tenant_id                TEXT NOT NULL REFERENCES tenants(servicem8_account_uuid),
   due_customer_id          TEXT NOT NULL REFERENCES due_customers(id),
   channel                  TEXT NOT NULL, -- sms | email
+  round                    INTEGER NOT NULL DEFAULT 1,
   draft_subject            TEXT,
   draft_body               TEXT NOT NULL,
   status                   TEXT NOT NULL DEFAULT 'pending', -- pending|approved_sending|sent|dismissed|failed
@@ -103,7 +118,7 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
   servicem8_message_uuid   TEXT,
   error                    TEXT,
   created_at               INTEGER NOT NULL,
-  UNIQUE(due_customer_id, channel)
+  UNIQUE(due_customer_id, channel, round)
 );
 CREATE INDEX IF NOT EXISTS idx_reminder_drafts_tenant_status ON reminder_drafts(tenant_id, status);
 

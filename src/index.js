@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges, createCompanyContact, sendPlatformSms } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -218,6 +218,7 @@ async function runNightlyReconciliation(env) {
     const startedAt = Date.now();
     try {
       const { jobsScanned } = await recomputeAllCategoriesForTenant(env, tenant.servicem8_account_uuid);
+      await generateFollowUpDraftsForTenant(env, tenant.servicem8_account_uuid);
       await env.DB.prepare(
         `INSERT INTO cron_runs (id, tenant_id, started_at, finished_at, jobs_scanned, due_found, error)
          VALUES (?, ?, ?, ?, ?, NULL, NULL)`
@@ -482,6 +483,7 @@ async function handleDebugRecompute(request, env) {
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
     const result = await recomputeAllCategoriesForTenant(env, tenantId);
+    await generateFollowUpDraftsForTenant(env, tenantId);
     return json(result);
   } catch (err) {
     return json({ error: String(err && err.message), stack: err && err.stack }, { status: 502 });
