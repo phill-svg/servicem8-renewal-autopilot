@@ -469,24 +469,12 @@ async function handleDebugCategories(request, env) {
   }
 }
 
-// TEMPORARY spike, to be removed immediately after use -- tests whether a
-// badge created via the API with NO file_name renders with ServiceM8's own
-// native "no icon, colored, auto-text-overlay" look (the "CHASE PAYMENT"
-// style), which was never actually tried this session (every prior attempt
-// forced a custom sprite image).
 async function handleDebugSpikeNoIconBadge(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
-  const name = new URL(request.url).searchParams.get("name");
-  if (!tenantId || !name) return json({ error: "?tenant= and ?name= required" }, { status: 400 });
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
-    const token = await getValidAccessToken(env, tenantId);
-    const res = await fetch(`https://api.servicem8.com/api_1.0/badge/25c0fcfb-2672-4fc3-970f-245777aa89ab.json`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    await deleteBadge(env, tenantId, "019fc8ae-0761-7e29-bef1-67700798559b");
     return json({ ok: true });
   } catch (err) {
     return json({ error: String(err && err.message) }, { status: 502 });
