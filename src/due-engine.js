@@ -283,10 +283,13 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
          -- a new completed job moves last_completed_at forward, that's a
          -- fresh cycle, so clear it. Otherwise leave whatever's there alone.
          dismissed_at = CASE WHEN excluded.last_completed_at != due_customers.last_completed_at THEN NULL ELSE due_customers.dismissed_at END,
-         contact_name_cache = excluded.contact_name_cache,
-         contact_email_cache = excluded.contact_email_cache,
-         contact_phone_cache = excluded.contact_phone_cache,
-         last_job_notes_cache = excluded.last_job_notes_cache,
+         -- Never overwrite a good cached contact/name with a blank: a failed
+         -- or rate-limited lookup returns "" and would otherwise wipe details
+         -- we'd previously fetched (this is what produced "Unknown" rows).
+         contact_name_cache = CASE WHEN excluded.contact_name_cache != '' THEN excluded.contact_name_cache ELSE due_customers.contact_name_cache END,
+         contact_email_cache = CASE WHEN excluded.contact_email_cache != '' THEN excluded.contact_email_cache ELSE due_customers.contact_email_cache END,
+         contact_phone_cache = CASE WHEN excluded.contact_phone_cache != '' THEN excluded.contact_phone_cache ELSE due_customers.contact_phone_cache END,
+         last_job_notes_cache = CASE WHEN excluded.last_job_notes_cache != '' THEN excluded.last_job_notes_cache ELSE due_customers.last_job_notes_cache END,
          computed_at = excluded.computed_at
        RETURNING id`
     )

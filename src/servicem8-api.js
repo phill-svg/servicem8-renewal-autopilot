@@ -20,15 +20,29 @@ const API_BASE = "https://api.servicem8.com/api_1.0";
 // https://api.servicem8.com/platform_service_sms, no /api_1.0 prefix.
 const PLATFORM_BASE = "https://api.servicem8.com";
 
-async function sm8Fetch(env, tenantId, path) {
-  const token = await getValidAccessToken(env, tenantId);
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-  });
-  if (!res.ok) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// GET with retry on rate-limit / transient errors. A full recompute fires
+// hundreds of reads in quick succession and ServiceM8 rate-limits per minute
+// (429); without retry those reads fail and callers (e.g. the contact lookup)
+// silently cache blanks -- which showed up as "Unknown" customers. Backs off
+// on 429 and 5xx, honouring Retry-After when present.
+async function sm8Fetch(env, tenantId, path, { retries = 4 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const token = await getValidAccessToken(env, tenantId);
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    });
+    if (res.ok) return res.json();
+    const retryable = res.status === 429 || res.status >= 500;
+    if (retryable && attempt < retries) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const waitMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(1000 * 2 ** attempt, 8000);
+      await sleep(waitMs);
+      continue;
+    }
     throw new Error(`ServiceM8 API ${path} failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
   }
-  return res.json();
 }
 
 async function sm8PostForm(env, tenantId, path, form) {
