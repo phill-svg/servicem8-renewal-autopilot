@@ -116,7 +116,7 @@ function isSameCalendarMonth(a, b) {
 // due date falls within the current calendar month even if the exact day
 // hasn't arrived yet -- confirmed with the user: a renewal due Aug 28 should
 // show as "due now" for all of August, not wait until the 28th.
-function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays) {
+function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays, dueLaterLeadDays) {
   const daysPastDue = daysBetween(dueDate, today);
 
   // Beyond overdueMaxDays past the due date, stop surfacing it at all --
@@ -129,6 +129,15 @@ function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMax
 
   const dueSoonStart = addDays(dueDate, -dueSoonLeadDays);
   if (today >= dueSoonStart) return "due_soon";
+
+  // "Due later" -- a further-out, separate lookahead window past due_soon
+  // (e.g. due_soon out to 2 months, due_later out to 3) so staff can see
+  // what's coming without it being lumped into the same actionable "due
+  // soon" list. NULL means this rule has no such extended window.
+  if (dueLaterLeadDays != null) {
+    const dueLaterStart = addDays(dueDate, -dueLaterLeadDays);
+    if (today >= dueLaterStart) return "due_later";
+  }
   return null; // not yet in any actionable bucket
 }
 
@@ -210,7 +219,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   const today = new Date();
   for (const [, { job, completedAt, addressKey }] of groups) {
     const dueDate = addMonths(completedAt, rule.interval_months);
-    const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days, rule.overdue_max_days);
+    const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days, rule.overdue_max_days, rule.due_later_lead_days);
     if (!bucket) continue; // not due yet -- don't create noise rows for every customer, only actionable ones
 
     let suppressedReason = null;

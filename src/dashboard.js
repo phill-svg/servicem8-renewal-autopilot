@@ -10,6 +10,7 @@ const STYLE = {
   overdue: { bg: "#fde2e1", border: "#c41613", label: "Overdue", text: "#7a0e0c" },
   due: { bg: "#ffe9d6", border: "#c2660a", label: "Due now", text: "#7a3d05" },
   due_soon: { bg: "#fff6d6", border: "#a68b00", label: "Due soon", text: "#6b5900" },
+  due_later: { bg: "#e8f0fe", border: "#3a6bc4", label: "Due later", text: "#254d8f" },
 };
 
 function telHref(p) {
@@ -57,7 +58,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
     for (const d of drafts || []) (draftsByCustomer[d.due_customer_id] ||= []).push(d);
   }
 
-  const counts = { overdue: 0, due: 0, due_soon: 0 };
+  const counts = { overdue: 0, due: 0, due_soon: 0, due_later: 0 };
   (dueCustomers || []).forEach((r) => (counts[r.bucket] = (counts[r.bucket] || 0) + 1));
 
   const allRowsData = (dueCustomers || [])
@@ -165,6 +166,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
     })
     .join("\n");
 
+  // Default-active tab: the first non-empty bucket in urgency order, falling
+  // back to Overdue if everything's empty (e.g. a fresh install).
+  const defaultBucket = ["overdue", "due", "due_soon", "due_later"].find((b) => counts[b] > 0) || "overdue";
+
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
 
@@ -188,9 +193,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
 <h1>Renewal Autopilot</h1>
 <div class="sub" id="sub-count">${allRowsData.filter((r) => !r.alreadyContacted).length} customer(s) due for renewal</div>
 <div class="tabs">
-  <button class="tab-btn${counts.overdue ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
-  <button class="tab-btn${!counts.overdue && counts.due ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
-  <button class="tab-btn${!counts.overdue && !counts.due ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
+  <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
+  <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
+  <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
+  <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later (${counts.due_later})</button>
 </div>
 <div class="toolbar">
   <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
