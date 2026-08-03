@@ -18,7 +18,12 @@ function telHref(p) {
 
 export async function renderDashboardHtml(env, tenantId, token) {
   const { results: dueCustomers } = await env.DB.prepare(
-    `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL ORDER BY bucket, last_completed_at`
+    `SELECT dc.*, cc.category_name_cache AS service_name
+     FROM due_customers dc
+     LEFT JOIN category_config cc
+       ON cc.tenant_id = dc.tenant_id AND cc.servicem8_category_uuid = dc.servicem8_category_uuid
+     WHERE dc.tenant_id = ? AND dc.suppressed_reason IS NULL
+     ORDER BY dc.bucket, dc.last_completed_at`
   )
     .bind(tenantId)
     .all();
@@ -66,6 +71,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
           ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" style="font-size:12px;color:${s.text};">${escapeHtml(r.contact_phone_cache)}</a>` : ""}
           ${draftHtml}
         </td>
+        <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.service_name || "Unknown")}</td>
         <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.last_completed_at || "")}</td>
       </tr>`;
     })
@@ -92,8 +98,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   <span><span class="swatch" style="background:${STYLE.due_soon.bg};border-left:4px solid ${STYLE.due_soon.border}"></span>Due soon (${counts.due_soon})</span>
 </div>
 <table>
-<thead><tr><th>Status</th><th>Customer</th><th>Last service</th></tr></thead>
-<tbody>${rows || '<tr><td colspan="3" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
+<thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
 </table>
 <script>
   document.querySelectorAll('.approve-btn').forEach(function (btn) {

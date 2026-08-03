@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -66,24 +66,49 @@ async function handleOAuthCallback(request, env, ctx) {
   // `?tenant=` query param on the callback URL we register (see
   // registerAllWebhooks), not by matching an account identifier out of
   // ServiceM8's payload.
-  const tenantId = randomId();
+  //
+  // A retried/rescoped install (e.g. changing OAuth scopes in the Developer
+  // Portal) hits this same callback again with no way to know it's "the same"
+  // ServiceM8 account until its first addon-callback JWT resolves it -- see
+  // resolveTenantFromAccountUuid. If exactly one already-resolved tenant
+  // exists, treat this as a reinstall of that tenant (refresh its token in
+  // place) rather than minting a new row that would need re-resolving. This
+  // is still a single-real-tenant simplification, same as
+  // resolveTenantFromAccountUuid -- true multi-tenant reinstall handling
+  // needs a real account-identifying call, which doesn't exist yet.
+  const { results: resolvedTenants } = await env.DB.prepare(
+    "SELECT * FROM tenants WHERE status = 'active' AND resolved_account_uuid IS NOT NULL"
+  ).all();
+
+  let tenantId;
   const now = Date.now();
-  try {
-    await env.DB.prepare(
-      `INSERT INTO tenants (servicem8_account_uuid, status, backfill_complete, backfill_cursor, installed_at)
-       VALUES (?, 'active', 0, NULL, ?)`
-    )
-      .bind(tenantId, now)
-      .run();
-    await storeTokens(env.DB, tenantId, tokens);
-    await env.DB.prepare(
-      `INSERT INTO tenant_settings (tenant_id, default_channel) VALUES (?, 'sms')`
-    )
-      .bind(tenantId)
-      .run();
-  } catch (err) {
-    console.error("oauth callback: failed to persist new tenant", err);
-    return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
+  if ((resolvedTenants || []).length === 1) {
+    tenantId = resolvedTenants[0].servicem8_account_uuid;
+    try {
+      await storeTokens(env.DB, tenantId, tokens);
+    } catch (err) {
+      console.error("oauth callback: failed to refresh existing tenant's tokens", err);
+      return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
+    }
+  } else {
+    tenantId = randomId();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO tenants (servicem8_account_uuid, status, backfill_complete, backfill_cursor, installed_at)
+         VALUES (?, 'active', 0, NULL, ?)`
+      )
+        .bind(tenantId, now)
+        .run();
+      await storeTokens(env.DB, tenantId, tokens);
+      await env.DB.prepare(
+        `INSERT INTO tenant_settings (tenant_id, default_channel) VALUES (?, 'sms')`
+      )
+        .bind(tenantId)
+        .run();
+    } catch (err) {
+      console.error("oauth callback: failed to persist new tenant", err);
+      return new Response(installErrorHtml("Installation failed -- please try again."), { status: 502, headers: { "Content-Type": "text/html" } });
+    }
   }
 
   const callbackUrl = `${url.origin}/webhooks/servicem8?tenant=${tenantId}`;
@@ -415,6 +440,37 @@ async function handleDebugRecompute(request, env) {
   }
 }
 
+async function handleDebugCategoryBreakdown(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  try {
+    const [jobs, categories] = await Promise.all([listAllCompletedJobs(env, tenantId), listCategories(env, tenantId)]);
+    const nameByUuid = {};
+    for (const c of categories || []) nameByUuid[c.uuid] = c.name;
+    const counts = {};
+    for (const j of jobs || []) {
+      const key = j.category_uuid ? nameByUuid[j.category_uuid] || j.category_uuid : "(no category)";
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return json({ totalCompletedJobs: (jobs || []).length, counts });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
+async function handleDebugOpenJobs(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const companyUuid = url.searchParams.get("company");
+  if (!tenantId || !companyUuid) return json({ error: "?tenant= and ?company= required" }, { status: 400 });
+  try {
+    const jobs = await listOpenJobsForCompany(env, tenantId, companyUuid);
+    return json({ jobs: (jobs || []).map((j) => ({ uuid: j.uuid, status: j.status, category_uuid: j.category_uuid, job_address: j.job_address, date: j.date })) });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugContact(request, env) {
   const url = new URL(request.url);
   const tenantId = url.searchParams.get("tenant");
@@ -467,6 +523,8 @@ export default {
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
     if (pathname === "/debug/contact" && method === "GET") return handleDebugContact(request, env);
+    if (pathname === "/debug/category-breakdown" && method === "GET") return handleDebugCategoryBreakdown(request, env);
+    if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });

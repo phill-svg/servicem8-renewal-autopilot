@@ -123,9 +123,11 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
       console.error(`due-engine: contact lookup failed for company ${job.company_uuid}:`, err);
     }
 
-    const id = randomId();
     const now = Date.now();
-    await env.DB.prepare(
+    // RETURNING id -- ON CONFLICT DO UPDATE keeps the row's *original* id, not
+    // the freshly generated one bound below, so the id used for the reminder
+    // draft lookup must come from what SQLite actually persisted.
+    const row = await env.DB.prepare(
       `INSERT INTO due_customers (
          id, tenant_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
          last_job_uuid, last_completed_at, bucket, suppressed_reason,
@@ -139,10 +141,11 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
          contact_name_cache = excluded.contact_name_cache,
          contact_email_cache = excluded.contact_email_cache,
          contact_phone_cache = excluded.contact_phone_cache,
-         computed_at = excluded.computed_at`
+         computed_at = excluded.computed_at
+       RETURNING id`
     )
       .bind(
-        id,
+        randomId(),
         tenantId,
         job.company_uuid,
         addressKey,
@@ -157,10 +160,10 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
         contact?.mobile || contact?.phone || "",
         now
       )
-      .run();
+      .first();
 
     if (!suppressedReason) {
-      await maybeCreateReminderDraft(env, tenantId, id);
+      await maybeCreateReminderDraft(env, tenantId, row.id);
     }
   }
 }

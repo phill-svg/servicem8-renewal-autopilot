@@ -73,12 +73,26 @@ export async function listCompletedJobsForCategory(env, tenantId, categoryUuid, 
   return sm8Fetch(env, tenantId, `/job.json?${odataFilter(clauses.join(" and "))}`);
 }
 
+// All completed jobs regardless of category -- used by the debug category
+// breakdown to show which category labels actually appear on real historical
+// jobs, since a tenant's category naming/tagging can't be assumed up front.
+export async function listAllCompletedJobs(env, tenantId) {
+  return sm8Fetch(env, tenantId, `/job.json?${odataFilter(`status eq 'Completed'`)}`);
+}
+
 // Open (in-pipeline) jobs for a company -- used by the due-engine's
 // already-rebooked exclusion, mirrors findOpenQuoteJob in
 // tcbpestcontriol/src/servicem8.js generalized to also catch Work Order.
+//
+// Confirmed live (2026-08-03): ServiceM8's `ne` filter operator doesn't
+// actually exclude anything -- `status ne 'Completed'` still returned
+// Completed jobs, which made every customer look "already rebooked" and
+// suppressed the entire due queue. Fetch by company_uuid only and filter
+// status client-side instead of trusting `ne`.
+const CLOSED_STATUSES = new Set(["Completed", "Unsuccessful"]);
 export async function listOpenJobsForCompany(env, tenantId, companyUuid) {
-  const clauses = [`company_uuid eq '${companyUuid}'`, `status ne 'Completed'`, `status ne 'Unsuccessful'`];
-  return sm8Fetch(env, tenantId, `/job.json?${odataFilter(clauses.join(" and "))}`);
+  const jobs = await sm8Fetch(env, tenantId, `/job.json?${odataFilter(`company_uuid eq '${companyUuid}'`)}`);
+  return (jobs || []).filter((j) => !CLOSED_STATUSES.has(j.status));
 }
 
 // Job Categories configured on the tenant's account, for the setup wizard's
