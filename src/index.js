@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, createBadge } from "./servicem8-api.js";
+import { getJob, listCategories, createBadge, deleteBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -479,8 +479,8 @@ async function handleDebugSpikeNoIconBadge(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
-    const uuid = await createBadge(env, tenantId, { name: "SPIKE no-icon test" });
-    return json({ uuid, ok: true });
+    await deleteBadge(env, tenantId, "019fc8ae-0761-7e29-bef1-67700798559b");
+    return json({ ok: true });
   } catch (err) {
     return json({ error: String(err && err.message) }, { status: 502 });
   }
