@@ -1,8 +1,8 @@
 {
-  "name": "servicem8-renewal-autopilot",
+  "name": "renewal-autopilot",
   "version": "0.1.0",
   "private": true,
-  "description": "ServiceM8 Add-on: tracks recurring-service due dates per customer and queues renewal reminders for staff approval.",
+  "description": "tracks recurring-service due dates per customer and queues renewal reminders for staff approval.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
