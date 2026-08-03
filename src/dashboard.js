@@ -14,7 +14,7 @@ const STYLE = {
   due: { accent: "#ea580c", bg: "#fff8f2", pillBg: "#ffedd5", pillFg: "#9a3412", label: "Due now" },
   due_soon: { accent: "#d97706", bg: "#fffcf3", pillBg: "#fef3c7", pillFg: "#92400e", label: "Due soon" },
   due_later: { accent: "#2563eb", bg: "#f4f8ff", pillBg: "#dbeafe", pillFg: "#1e40af", label: "Due later" },
-  contacted: { accent: "#16a34a", bg: "#f4fdf6", pillBg: "#dcfce7", pillFg: "#166534", label: "Contacted" },
+  contacted: { accent: "#64748b", bg: "#f7f8fa", pillBg: "#e2e8f0", pillFg: "#334155", label: "Contacted" },
 };
 
 function telHref(p) {
@@ -219,7 +219,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 <style>
   :root {
     --bg: #f4f5f7; --surface: #ffffff; --ink: #0f172a; --ink-2: #334155; --muted: #64748b; --faint: #94a3b8;
-    --line: #eceef1; --line-2: #e2e5ea; --brand: #16a34a; --brand-600: #15803d; --brand-ink: #166534;
+    --line: #eceef1; --line-2: #e2e5ea; --brand: #dc2626; --brand-600: #b91c1c; --brand-ink: #991b1b;
     --sh-sm: 0 1px 2px rgba(15,23,42,.05); --sh-md: 0 1px 3px rgba(15,23,42,.08), 0 1px 2px rgba(15,23,42,.04);
     --sh-lg: 0 4px 12px rgba(15,23,42,.07), 0 2px 4px rgba(15,23,42,.04);
   }
@@ -228,9 +228,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .ic { vertical-align: -1px; flex: none; }
 
   /* top app bar -- bold branded green */
-  .topbar { position: sticky; top: 0; z-index: 20; background: linear-gradient(100deg, #166534 0%, #15803d 45%, #16a34a 100%); box-shadow: 0 2px 10px rgba(21,128,61,.25); }
+  .topbar { position: sticky; top: 0; z-index: 20; background: linear-gradient(100deg, #991b1b 0%, #b91c1c 45%, #dc2626 100%); box-shadow: 0 2px 10px rgba(185,28,28,.25); }
   .topbar-in { max-width: 1080px; margin: 0 auto; padding: 13px 24px; display: flex; align-items: center; gap: 13px; }
-  .logo { width: 38px; height: 38px; border-radius: 11px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; flex: none; backdrop-filter: blur(4px); }
+  .logo { width: 40px; height: 40px; border-radius: 10px; background: #fff; border: 1px solid rgba(255,255,255,.4); display: flex; align-items: center; justify-content: center; flex: none; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+  .logo img { width: 100%; height: 100%; object-fit: contain; }
   .brand-txt h1 { font-size: 16.5px; font-weight: 750; margin: 0; letter-spacing: -.015em; line-height: 1.1; color: #fff; }
   .brand-txt .tag { font-size: 11.5px; color: rgba(255,255,255,.8); font-weight: 500; letter-spacing: .01em; }
   .topbar-count { margin-left: auto; font-size: 12.5px; color: #fff; font-weight: 500; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 6px 13px; }
@@ -249,7 +250,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .tab-btn.active .n { color: #fff; background: var(--ink); }
   .contacted-dd { align-self: center; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--sh-sm); transition: all .14s; }
   .contacted-dd:hover { border-color: #cbd5e1; color: var(--ink-2); }
-  .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #f0fdf4; box-shadow: 0 0 0 3px rgba(22,163,74,.1); }
+  .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #fef2f2; box-shadow: 0 0 0 3px rgba(220,38,38,.1); }
   .filter { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .filter label { font-size: 12.5px; color: var(--muted); font-weight: 500; }
   #service-filter { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--surface); box-shadow: var(--sh-sm); cursor: pointer; }
@@ -292,11 +293,11 @@ export async function renderDashboardHtml(env, tenantId, token) {
   /* draft composer */
   .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .sent-chip { font-size: 11px; font-weight: 700; color: var(--brand-ink); background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .sent-chip { font-size: 11px; font-weight: 700; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
-  .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
+  .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
-  .draft-toggle:hover { background: #dcfce7; }
+  .draft-toggle:hover { background: #fee2e2; }
   .draft-toggle .ic { color: var(--brand); }
   .draft-wrap[open] .draft-toggle { border-radius: 8px 8px 0 0; margin-bottom: -1px; background: #fff; }
   .draft-card { padding: 11px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 0 11px 11px 11px; max-width: 470px; }
@@ -309,8 +310,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-hint { font-size: 11.5px; color: var(--faint); }
   .approve-btn .send-ch { font-weight: 800; letter-spacing: .04em; }
   .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.5; padding: 10px 11px; border: 1px solid var(--line-2); border-radius: 9px; resize: vertical; min-height: 5.2em; margin-bottom: 9px; color: var(--ink); background: #fff; transition: border-color .12s, box-shadow .12s; }
-  .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.13); }
-  .approve-btn { display: inline-flex; align-items: center; gap: 7px; background: var(--brand); color: #fff; border: none; border-radius: 9px; padding: 9px 16px; font-size: 12.5px; font-weight: 650; cursor: pointer; box-shadow: 0 1px 2px rgba(21,128,61,.35); transition: background .13s, transform .06s; }
+  .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(220,38,38,.13); }
+  .approve-btn { display: inline-flex; align-items: center; gap: 7px; background: var(--brand); color: #fff; border: none; border-radius: 9px; padding: 9px 16px; font-size: 12.5px; font-weight: 650; cursor: pointer; box-shadow: 0 1px 2px rgba(185,28,28,.35); transition: background .13s, transform .06s; }
   .approve-btn:hover:not(:disabled) { background: var(--brand-600); }
   .approve-btn:active:not(:disabled) { transform: translateY(1px); }
   .approve-btn:disabled { opacity: .6; cursor: default; box-shadow: none; }
@@ -331,7 +332,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </head>
 <body>
 <div class="topbar"><div class="topbar-in">
-  <div class="logo">&#8635;</div>
+  <div class="logo"><img src="/assets/images/addon-icon-512.png" alt="Renewal Autopilot logo"></div>
   <div class="brand-txt"><h1>Renewal Autopilot</h1><div class="tag">Renewal reminder queue</div></div>
   <div class="topbar-count"><b>${(dueCustomers || []).length}</b> tracked</div>
 </div></div>
