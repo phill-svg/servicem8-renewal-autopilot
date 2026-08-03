@@ -104,11 +104,30 @@ function addDays(date, days) {
   return d;
 }
 
-function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays) {
+function daysBetween(a, b) {
+  return Math.floor((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
+}
+function isSameCalendarMonth(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
+// "Due now" starts either once the exact due date has passed (up to
+// overdueGraceDays later, before flipping to "overdue"), OR as soon as the
+// due date falls within the current calendar month even if the exact day
+// hasn't arrived yet -- confirmed with the user: a renewal due Aug 28 should
+// show as "due now" for all of August, not wait until the 28th.
+function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays) {
+  const daysPastDue = daysBetween(dueDate, today);
+
+  // Beyond overdueMaxDays past the due date, stop surfacing it at all --
+  // this old, it's a stale/lost-cause case, not worth cluttering the queue.
+  if (overdueMaxDays != null && daysPastDue >= overdueMaxDays) return null;
+
+  if (daysPastDue >= overdueGraceDays) return "overdue";
+  if (daysPastDue >= 0) return "due";
+  if (isSameCalendarMonth(today, dueDate)) return "due";
+
   const dueSoonStart = addDays(dueDate, -dueSoonLeadDays);
-  const overdueStart = addDays(dueDate, overdueGraceDays);
-  if (today >= overdueStart) return "overdue";
-  if (today >= dueDate) return "due";
   if (today >= dueSoonStart) return "due_soon";
   return null; // not yet in any actionable bucket
 }
@@ -171,7 +190,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   const today = new Date();
   for (const [, { job, completedAt, addressKey }] of groups) {
     const dueDate = addMonths(completedAt, rule.interval_months);
-    const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days);
+    const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days, rule.overdue_max_days);
     if (!bucket) continue; // not due yet -- don't create noise rows for every customer, only actionable ones
 
     let suppressedReason = null;

@@ -52,7 +52,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   const counts = { overdue: 0, due: 0, due_soon: 0 };
   (dueCustomers || []).forEach((r) => (counts[r.bucket] = (counts[r.bucket] || 0) + 1));
 
-  const rows = (dueCustomers || [])
+  const allRowsData = (dueCustomers || [])
     .map((r) => {
       const s = STYLE[r.bucket] || STYLE.due_soon;
       const drafts = draftsByCustomer[r.id] || [];
@@ -97,7 +97,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
         </div>`;
       }
 
-      return `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" style="background:${s.bg};border-left:4px solid ${s.border}">
+      // Fully handled (had drafts, none left pending) moves to the separate
+      // "Already contacted" section below instead of cluttering the main
+      // actionable list -- staff shouldn't have to re-check something with
+      // nothing left to do.
+      const alreadyContacted = drafts.length > 0 && !pendingChannels.length;
+
+      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" style="background:${s.bg};border-left:4px solid ${s.border}">
         <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
         <td style="padding:10px;vertical-align:top;">
           <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -111,8 +117,11 @@ export async function renderDashboardHtml(env, tenantId, token) {
           <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
         </td>
       </tr>`;
-    })
-    .join("\n");
+      return { html, alreadyContacted };
+    });
+
+  const rows = allRowsData.filter((r) => !r.alreadyContacted).map((r) => r.html).join("\n");
+  const contactedRows = allRowsData.filter((r) => r.alreadyContacted).map((r) => r.html).join("\n");
 
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
@@ -134,7 +143,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </head>
 <body>
 <h1>Renewal Autopilot</h1>
-<div class="sub" id="sub-count">${(dueCustomers || []).length} customer(s) due for renewal</div>
+<div class="sub" id="sub-count">${allRowsData.filter((r) => !r.alreadyContacted).length} customer(s) due for renewal</div>
 <div class="legend">
   <span><span class="swatch" style="background:${STYLE.overdue.bg};border-left:4px solid ${STYLE.overdue.border}"></span>Overdue (${counts.overdue})</span>
   <span><span class="swatch" style="background:${STYLE.due.bg};border-left:4px solid ${STYLE.due.border}"></span>Due now (${counts.due})</span>
@@ -147,14 +156,26 @@ export async function renderDashboardHtml(env, tenantId, token) {
     ${filterOptions}
   </select>
 </div>
-<table>
+<table id="due-table">
 <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
 <tbody>${rows || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
 </table>
 <div id="empty-filtered">No customers due for this service.</div>
+
+${
+  contactedRows
+    ? `<details style="margin-top:24px;">
+  <summary style="cursor:pointer;font-size:13px;color:#666;padding:8px 0;">Already contacted (${allRowsData.filter((r) => r.alreadyContacted).length}) -- reminders sent, nothing left to do</summary>
+  <table style="margin-top:8px;">
+  <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
+  <tbody>${contactedRows}</tbody>
+  </table>
+</details>`
+    : ""
+}
 <script>
   var filterSelect = document.getElementById('service-filter');
-  var allRows = Array.prototype.slice.call(document.querySelectorAll('table tbody tr[data-service]'));
+  var allRows = Array.prototype.slice.call(document.querySelectorAll('#due-table tbody tr[data-service]'));
   filterSelect.addEventListener('change', function () {
     var value = filterSelect.value;
     var visibleCount = 0;

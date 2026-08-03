@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges, createCompanyContact } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -649,6 +649,23 @@ async function handleDebugDeleteBadgeByUuid(request, env) {
   }
 }
 
+async function handleDebugCreateContact(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const companyUuid = url.searchParams.get("companyUuid");
+  const first = url.searchParams.get("first");
+  const mobile = url.searchParams.get("mobile");
+  if (!tenantId || !companyUuid || !first || !mobile) {
+    return json({ error: "?tenant=, ?companyUuid=, ?first=, ?mobile= required" }, { status: 400 });
+  }
+  try {
+    await createCompanyContact(env, tenantId, { companyUuid, first, mobile, isPrimary: true });
+    return json({ ok: true });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugCreateBadges(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
@@ -856,6 +873,7 @@ export default {
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
     if (pathname === "/debug/create-test-badge" && method === "POST") return handleDebugCreateTestBadge(request, env);
+    if (pathname === "/debug/create-contact" && method === "POST") return handleDebugCreateContact(request, env);
     if (pathname === "/debug/delete-badge" && method === "POST") return handleDebugDeleteBadgeByUuid(request, env);
     if (pathname === "/debug/apply-badge-to-matching" && method === "POST") return handleDebugApplyBadgeToMatching(request, env);
     if (pathname === "/debug/apply-badge-to-jobs" && method === "POST") return handleDebugApplyBadgeToJobs(request, env);

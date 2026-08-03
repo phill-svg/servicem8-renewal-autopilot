@@ -126,6 +126,18 @@ export async function createBadge(env, tenantId, { name, fileUrl }) {
 // the record's own .json URL with only the changed fields (same shape as
 // creating, per their docs). Used for one-off historical-data cleanup (see
 // /debug/reclassify-jobs), not part of the live due-detection path.
+// Creates a Company Contact -- used to attach a test phone number to the
+// throwaway test job/company for end-to-end reminder-send verification.
+export async function createCompanyContact(env, tenantId, { companyUuid, first, last, mobile, isPrimary }) {
+  return sm8PostJson(env, tenantId, `/companycontact.json`, {
+    company_uuid: companyUuid,
+    first,
+    last: last || "",
+    mobile,
+    is_primary_contact: isPrimary ? "1" : "0",
+  });
+}
+
 export async function updateJobCategory(env, tenantId, jobUuid, categoryUuid) {
   return sm8PostJson(env, tenantId, `/job/${jobUuid}.json`, { category_uuid: categoryUuid });
 }

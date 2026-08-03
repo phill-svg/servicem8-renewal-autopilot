@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS category_config (
   interval_months          INTEGER NOT NULL,
   due_soon_lead_days       INTEGER NOT NULL DEFAULT 30,
   overdue_grace_days       INTEGER NOT NULL DEFAULT 14,
+  overdue_max_days         INTEGER,       -- stop surfacing once overdue by more than this (NULL = no cap)
   is_tracked               INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_category_config_tenant ON category_config(tenant_id);

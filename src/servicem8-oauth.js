@@ -16,7 +16,7 @@ const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
 // read_customers -- confirmed via a live 403 ("read_customer_contacts scope
 // required") on /companycontact.json, which is where phone/email actually
 // live (the Company record itself has neither).
-export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_badges publish_sms publish_email";
+export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email";
 
 export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   const url = new URL(AUTHORIZE_URL);
