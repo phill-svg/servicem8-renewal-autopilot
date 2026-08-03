@@ -23,9 +23,9 @@ import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsFo
 // overlay the badge name as text on custom-image badges the way it does for
 // its own icon-picker badges.
 const RENEWAL_BADGES = [
-  { name: "Renewal Autopilot - 3 Month", file: "badge-3month-v2.png" },
-  { name: "Renewal Autopilot - 6 Month", file: "badge-6month-v2.png" },
-  { name: "Renewal Autopilot - 1 Year", file: "badge-1year-v2.png" },
+  { name: "Renewal Autopilot - 3 Month", file: "badge-3month-v3.png" },
+  { name: "Renewal Autopilot - 6 Month", file: "badge-6month-v3.png" },
+  { name: "Renewal Autopilot - 1 Year", file: "badge-1year-v3.png" },
 ];
 const AUTO_TRACKED_BADGE_NAME = "Renewal Autopilot - 1 Year";
 const AUTO_TRACKED_INTERVAL_MONTHS = 12;

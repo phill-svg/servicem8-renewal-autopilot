@@ -64,8 +64,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
               }
               if (d.status === "pending") {
                 return `<div style="margin-top:8px;padding:8px;background:#fff;border:1px solid #e6e6ea;border-radius:4px;">
-                  <div style="font-size:12px;color:#666;margin-bottom:4px;">${escapeHtml(d.channel.toUpperCase())} draft</div>
-                  <div style="font-size:13px;white-space:pre-wrap;margin-bottom:6px;">${escapeHtml(d.draft_body)}</div>
+                  <div style="font-size:12px;color:#666;margin-bottom:4px;">${escapeHtml(d.channel.toUpperCase())} draft -- edit before sending if needed</div>
+                  <textarea data-draft-text="${escapeHtml(d.id)}" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;min-height:4.5em;margin-bottom:6px;">${escapeHtml(d.draft_body)}</textarea>
                   <button data-draft="${escapeHtml(d.id)}" class="approve-btn" style="background:#2b2b30;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Approve &amp; Send</button>
                 </div>`;
               }
@@ -143,13 +143,15 @@ export async function renderDashboardHtml(env, tenantId, token) {
 
   document.querySelectorAll('.approve-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
+      var draftId = btn.dataset.draft;
+      var textarea = document.querySelector('textarea[data-draft-text="' + draftId + '"]');
       btn.disabled = true;
       btn.textContent = 'Sending...';
       try {
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: btn.dataset.draft }),
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea ? textarea.value : undefined }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
@@ -159,34 +161,39 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </body></html>`;
 }
 
-export async function approveAndSendDraft(env, tenantId, draftId) {
+// editedBody: staff can revise the draft text in the dashboard textarea
+// before sending -- when present (and non-empty after trimming) it's what
+// actually gets sent, and it's persisted onto the draft row so the record
+// reflects what really went out, not the original auto-generated wording.
+export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
   const draft = await env.DB.prepare("SELECT * FROM reminder_drafts WHERE id = ? AND tenant_id = ?").bind(draftId, tenantId).first();
   if (!draft) throw new Error("draft not found for this tenant");
   if (draft.status !== "pending") return; // already actioned -- idempotent
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
+  const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
 
   try {
     if (draft.channel === "sms") {
       await sendPlatformSms(env, tenantId, {
         to: dueCustomer.contact_phone_cache,
-        message: draft.draft_body,
+        message: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });
     } else {
       await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
         subject: draft.draft_subject || "You're due for your next service",
-        textBody: draft.draft_body,
+        textBody: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });
     }
-    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', sent_at = ?, reviewed_at = ? WHERE id = ?")
-      .bind(Date.now(), Date.now(), draftId)
+    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
+      .bind(body, Date.now(), Date.now(), draftId)
       .run();
   } catch (err) {
-    await env.DB.prepare("UPDATE reminder_drafts SET status = 'failed', error = ?, reviewed_at = ? WHERE id = ?")
-      .bind(String(err && err.message), Date.now(), draftId)
+    await env.DB.prepare("UPDATE reminder_drafts SET status = 'failed', draft_body = ?, error = ?, reviewed_at = ? WHERE id = ?")
+      .bind(body, String(err && err.message), Date.now(), draftId)
       .run();
     throw err;
   }

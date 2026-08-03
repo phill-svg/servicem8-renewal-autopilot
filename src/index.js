@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -116,13 +116,13 @@ async function handleOAuthCallback(request, env, ctx) {
   if (ctx && ctx.waitUntil) ctx.waitUntil(registerWebhooks);
   else await registerWebhooks;
 
-  // Awaited (not backgrounded) so the tenant has a working default rule the
-  // moment install finishes, not some indeterminate time later.
-  try {
-    await ensureRenewalBadgesAndDefaultRule(env, tenantId, url.origin);
-  } catch (err) {
-    console.error(`oauth callback: failed to set up renewal badges for tenant ${tenantId}`, err);
-  }
+  // Deliberately does NOT auto-create a badge for the tenant (see
+  // 2026-08-03: ServiceM8's API has no colour field and never overlays the
+  // badge name as text on a custom-image badge -- only badges created
+  // through ServiceM8's own UI, picking "no icon" + a colour, get that
+  // native look). Every tenant creates their own renewal badge natively and
+  // tells the setup wizard which one to track -- same flow as configuring a
+  // category-based rule.
 
   return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
 }
@@ -395,13 +395,13 @@ async function handleDashboard(request, env) {
 }
 
 async function handleDashboardApprove(request, env) {
-  const { token, draftId } = await readJson(request);
+  const { token, draftId, editedBody } = await readJson(request);
   const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
   if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
   if (!draftId) return json({ error: "draftId required" }, { status: 400 });
 
   try {
-    await approveAndSendDraft(env, tenantId, draftId);
+    await approveAndSendDraft(env, tenantId, draftId, editedBody);
     return json({ ok: true });
   } catch (err) {
     console.error(`dashboard approve failed for tenant ${tenantId}, draft ${draftId}`, err);
@@ -524,6 +524,84 @@ async function handleDebugReclassifyStandard(request, env) {
 // from TCB's existing "3/6 Month Follow-up"/"1 Year Follow-up" badges so as
 // not to disturb whatever those are already used for. Only the 1-year one is
 // wired into a tracking rule for now -- see /debug/configure-category.
+// Generic one-off badge-creation test -- isolates variables (single flat
+// image, no sprite stacking, opaque or transparent) to determine whether
+// ServiceM8 auto-overlays the badge name on a plain file_name image.
+async function handleDebugCreateTestBadge(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const name = url.searchParams.get("name");
+  const fileUrl = url.searchParams.get("fileUrl");
+  if (!tenantId || !name || !fileUrl) return json({ error: "?tenant=, ?name=, ?fileUrl= required" }, { status: 400 });
+  try {
+    const uuid = await createBadge(env, tenantId, { name, fileUrl });
+    return json({ uuid, name, fileUrl, ok: true });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
+// Additive bulk operation: finds every job carrying `fromBadgeUuid` and adds
+// `toBadgeUuid` alongside it (never removes the original). Used to roll the
+// new "1 year auto" badge out onto every job that already has TCB's original
+// "1 Year Follow-up" badge, so the due-detection engine's badge-based rule
+// (once pointed at the new badge) has real history from day one instead of
+// starting empty.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function handleDebugApplyBadgeToMatching(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const fromBadgeUuid = url.searchParams.get("fromBadge");
+  const toBadgeUuid = url.searchParams.get("toBadge");
+  // Optional cap for controlled testing before running the full batch --
+  // ServiceM8 rate-limits API calls per minute, so this also throttles with
+  // a delay between writes rather than firing all of them back to back.
+  const limit = Number(url.searchParams.get("limit")) || Infinity;
+  if (!tenantId || !fromBadgeUuid || !toBadgeUuid) {
+    return json({ error: "?tenant=, ?fromBadge=, ?toBadge= required" }, { status: 400 });
+  }
+  try {
+    const jobs = (await listAllJobsAnyStatus(env, tenantId)) || [];
+    const matching = jobs.filter((j) => parseBadges(j.badges).includes(fromBadgeUuid)).slice(0, limit);
+    let updated = 0;
+    let alreadyHad = 0;
+    const errors = [];
+    for (const job of matching) {
+      const current = parseBadges(job.badges);
+      if (current.includes(toBadgeUuid)) {
+        alreadyHad++;
+        continue;
+      }
+      try {
+        await updateJobBadges(env, tenantId, job.uuid, [...current, toBadgeUuid]);
+        updated++;
+      } catch (err) {
+        errors.push({ jobUuid: job.uuid, error: String(err && err.message) });
+      }
+      await sleep(350); // stay comfortably under ServiceM8's per-minute limit
+    }
+    return json({ totalMatching: matching.length, processed: matching.length, updated, alreadyHad, errors });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
+async function handleDebugDeleteBadgeByUuid(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const uuid = url.searchParams.get("uuid");
+  if (!tenantId || !uuid) return json({ error: "?tenant= and ?uuid= required" }, { status: 400 });
+  try {
+    await deleteBadge(env, tenantId, uuid);
+    return json({ uuid, ok: true });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugCreateBadges(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
@@ -554,9 +632,9 @@ async function handleDebugUpdateBadgeIcons(request, env) {
   // the "CHASE PAYMENT" style Phill pointed to (a solid color circle with
   // just text, made via ServiceM8's own "no icon" picker option).
   const fileByName = {
-    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month-v2.png`,
-    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month-v2.png`,
-    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year-v2.png`,
+    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month-v3.png`,
+    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month-v3.png`,
+    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year-v3.png`,
   };
   try {
     const badges = (await listBadges(env, tenantId)) || [];
@@ -729,6 +807,9 @@ export default {
     if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
+    if (pathname === "/debug/create-test-badge" && method === "POST") return handleDebugCreateTestBadge(request, env);
+    if (pathname === "/debug/delete-badge" && method === "POST") return handleDebugDeleteBadgeByUuid(request, env);
+    if (pathname === "/debug/apply-badge-to-matching" && method === "POST") return handleDebugApplyBadgeToMatching(request, env);
     if (pathname === "/debug/update-badge-icons" && method === "POST") return handleDebugUpdateBadgeIcons(request, env);
     if (pathname === "/debug/delete-renewal-badges" && method === "POST") return handleDebugDeleteRenewalBadges(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);

@@ -130,6 +130,22 @@ export async function updateJobCategory(env, tenantId, jobUuid, categoryUuid) {
   return sm8PostJson(env, tenantId, `/job/${jobUuid}.json`, { category_uuid: categoryUuid });
 }
 
+// Badges must be WRITTEN as a JSON-encoded string ("must be a JSON array
+// encoded string" per a live 400) -- same encoding as how they come back on
+// read (see parseBadges), so this is symmetric after all once written
+// correctly. A raw JS array in the request body is rejected.
+export async function updateJobBadges(env, tenantId, jobUuid, badgesArray) {
+  return sm8PostJson(env, tenantId, `/job/${jobUuid}.json`, { badges: JSON.stringify(badgesArray) });
+}
+
+// All jobs regardless of status -- badges can be applied to jobs in any
+// status (Quote, Work Order, Completed), not just Completed ones, so the
+// due-detection engine's listAllCompletedJobs (status-filtered) isn't
+// sufficient for a badge-driven bulk operation across every job.
+export async function listAllJobsAnyStatus(env, tenantId) {
+  return sm8Fetch(env, tenantId, `/job.json`);
+}
+
 // Completed jobs for a category, optionally only those completed *before* a
 // cursor date -- this is the chunking mechanism for backfill (see
 // src/due-engine.js): each chunk asks for the next slice moving backward in
@@ -156,7 +172,7 @@ export async function listAllCompletedJobs(env, tenantId, { before } = {}) {
 // ServiceM8 sends `badges` as a JSON-*encoded string* (e.g. `'["uuid1","uuid2"]'`),
 // not a real array, on both list and single-job responses -- confirmed live
 // (2026-08-03). Parse defensively; a malformed/empty value just means no badges.
-function parseBadges(badgesField) {
+export function parseBadges(badgesField) {
   if (Array.isArray(badgesField)) return badgesField;
   if (typeof badgesField !== "string" || !badgesField) return [];
   try {
