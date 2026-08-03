@@ -151,10 +151,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
 
   const rows = allRowsData.map((r) => r.html).join("\n");
 
-  // Default-active tab: the first non-empty bucket in urgency order, falling
-  // back to Overdue if everything's empty (e.g. a fresh install).
-  const TAB_ORDER = ["overdue", "due", "due_soon", "due_later", "contacted1", "contacted2", "contacted3"];
-  const defaultBucket = TAB_ORDER.find((b) => counts[b] > 0) || "overdue";
+  // Default-active tab is always one of the four urgency buckets (the
+  // Contacted stages live in a dropdown, not the tab strip, so they never
+  // start selected) -- first non-empty in urgency order, else Overdue.
+  const defaultBucket = ["overdue", "due", "due_soon", "due_later"].find((b) => counts[b] > 0) || "overdue";
   const actionableCount = counts.overdue + counts.due + counts.due_soon + counts.due_later;
 
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
@@ -171,6 +171,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .tabs { display:flex; gap:0; margin-bottom:0; border-bottom:2px solid #e6e6ea; }
   .tab-btn { background:none; border:none; padding:10px 18px; font-size:13px; font-weight:600; color:#666; cursor:pointer; border-bottom:3px solid transparent; margin-bottom:-2px; }
   .tab-btn.active { color:#222; border-bottom-color:#2b2b30; }
+  .contacted-dd { margin-left:12px; align-self:center; padding:6px 8px; border-radius:4px; border:1px solid #ccc; font-size:13px; font-weight:600; color:#666; background:#fff; cursor:pointer; }
+  .contacted-dd.active { color:#1b5e20; border-color:#2e7d32; }
   .toolbar { margin: 14px 0; display:flex; align-items:center; gap:8px; }
   .toolbar select { padding:6px 10px; border-radius:4px; border:1px solid #ccc; font-size:13px; }
   #empty-filtered { display:none; padding:20px; text-align:center; color:#999; background:#fff; }
@@ -184,9 +186,12 @@ export async function renderDashboardHtml(env, tenantId, token) {
   <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
   <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
   <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later (${counts.due_later})</button>
-  <button class="tab-btn${defaultBucket === "contacted1" ? " active" : ""}" data-tab-bucket="contacted1" style="margin-left:12px;">Contacted 1 (${counts.contacted1})</button>
-  <button class="tab-btn${defaultBucket === "contacted2" ? " active" : ""}" data-tab-bucket="contacted2">Contacted 2 (${counts.contacted2})</button>
-  <button class="tab-btn${defaultBucket === "contacted3" ? " active" : ""}" data-tab-bucket="contacted3">Contacted 3 (${counts.contacted3})</button>
+  <select id="contacted-select" class="contacted-dd">
+    <option value="">Contacted &#9662;</option>
+    <option value="contacted1">Contacted 1 (${counts.contacted1})</option>
+    <option value="contacted2">Contacted 2 (${counts.contacted2})</option>
+    <option value="contacted3">Contacted 3 (${counts.contacted3})</option>
+  </select>
 </div>
 <div class="toolbar">
   <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
@@ -221,14 +226,30 @@ export async function renderDashboardHtml(env, tenantId, token) {
     document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
   }
 
+  var contactedSelect = document.getElementById('contacted-select');
+
   tabBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
       tabBtns.forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
+      contactedSelect.value = '';
+      contactedSelect.classList.remove('active');
       activeBucket = btn.dataset.tabBucket;
       applyFilters();
     });
   });
+
+  // The Contacted stages live in this dropdown rather than as their own tabs.
+  // Picking one deselects the urgency tabs and filters to that stage; the
+  // dropdown itself lights up so it's clear it -- not a tab -- is the active view.
+  contactedSelect.addEventListener('change', function () {
+    if (!contactedSelect.value) return;
+    tabBtns.forEach(function (b) { b.classList.remove('active'); });
+    contactedSelect.classList.add('active');
+    activeBucket = contactedSelect.value;
+    applyFilters();
+  });
+
   filterSelect.addEventListener('change', applyFilters);
   applyFilters();
 
