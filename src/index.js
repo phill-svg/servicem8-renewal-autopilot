@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -415,6 +415,19 @@ async function handleDebugRecompute(request, env) {
   }
 }
 
+async function handleDebugContact(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const companyUuid = url.searchParams.get("company");
+  if (!tenantId || !companyUuid) return json({ error: "?tenant= and ?company= required" }, { status: 400 });
+  try {
+    const contact = await getPrimaryContact(env, tenantId, companyUuid);
+    return json({ contact });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugDueCustomers(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
@@ -453,6 +466,7 @@ export default {
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
+    if (pathname === "/debug/contact" && method === "GET") return handleDebugContact(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });

@@ -12,10 +12,11 @@
 const AUTHORIZE_URL = "https://go.servicem8.com/oauth/authorize";
 const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
 
-// Space-separated scopes -- exact literal names need confirming against the
-// live Developer Portal scope picker when the App is registered (flagged in
-// the plan as an open item; these are the best-documented candidates).
-export const OAUTH_SCOPES = "read_jobs read_job_categories read_customers publish_sms publish_email";
+// Space-separated scopes. read_customer_contacts is distinct from
+// read_customers -- confirmed via a live 403 ("read_customer_contacts scope
+// required") on /companycontact.json, which is where phone/email actually
+// live (the Company record itself has neither).
+export const OAUTH_SCOPES = "read_jobs read_job_categories read_customers read_customer_contacts publish_sms publish_email";
 
 export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   const url = new URL(AUTHORIZE_URL);

@@ -6,7 +6,7 @@
   "activationURL": "https://renewal-autopilot.phill-abb.workers.dev/install",
   "callbackURL": "https://renewal-autopilot.phill-abb.workers.dev/oauth/callback",
   "oauth": {
-    "scope": "read_jobs read_job_categories read_customers publish_sms publish_email"
+    "scope": "read_jobs read_job_categories read_customers read_customer_contacts publish_sms publish_email"
   },
   "actions": [
     {
