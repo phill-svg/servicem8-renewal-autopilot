@@ -106,13 +106,26 @@ export async function renderDashboardHtml(env, tenantId, token) {
   const allRowsData = (dueCustomers || [])
     .map((r) => {
       const drafts = draftsByCustomer[r.id] || [];
-      const smsDraft = drafts.find((d) => d.channel === "sms");
-      const emailDraft = drafts.find((d) => d.channel === "email");
+      // Only the CURRENT round's drafts are actionable. reminder_round is the
+      // next round to send (1 = nothing sent yet), and it advances the moment
+      // ANY channel is sent -- so once you send, say, the email for round 1,
+      // reminder_round becomes 2 and the still-pending round-1 SMS is no longer
+      // "current", so it stops holding the customer in their urgency bucket.
+      // One send = contacted; no nagging you to also hit the other channel.
+      const currentRound = r.reminder_round || 1;
+      const roundDrafts = drafts.filter((d) => (d.round || 1) === currentRound);
+      const smsDraft = roundDrafts.find((d) => d.channel === "sms");
+      const emailDraft = roundDrafts.find((d) => d.channel === "email");
       const pendingChannels = [
         smsDraft && smsDraft.status === "pending" ? "sms" : null,
         emailDraft && emailDraft.status === "pending" ? "email" : null,
       ].filter(Boolean);
-      const sentChannels = [smsDraft, emailDraft].filter((d) => d && d.status === "sent");
+      const everSent = drafts.some((d) => d.status === "sent");
+      // For the "sent" chip: whichever channel(s) went out in the most recently
+      // completed round.
+      const sentRounds = drafts.filter((d) => d.status === "sent").map((d) => d.round || 1);
+      const lastSentRound = sentRounds.length ? Math.max(...sentRounds) : 0;
+      const sentChannels = drafts.filter((d) => d.status === "sent" && (d.round || 1) === lastSentRound);
 
       let draftHtml;
       if (!drafts.length) {
@@ -160,7 +173,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
       // src/due-engine.js's generateFollowUpDraftsForTenant), those drafts are
       // pending again, so they automatically move BACK into their urgency
       // bucket to be actioned -- then to Contacted N+1 once sent, and so on.
-      const alreadyContacted = drafts.length > 0 && !pendingChannels.length;
+      const alreadyContacted = everSent && !pendingChannels.length;
       const contactedRound = Math.min(Math.max((r.reminder_round || 1) - 1, 1), 3);
       const tabBucket = alreadyContacted ? `contacted${contactedRound}` : r.bucket;
       const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
