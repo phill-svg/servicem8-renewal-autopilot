@@ -127,39 +127,39 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const lastSentRound = sentRounds.length ? Math.max(...sentRounds) : 0;
       const sentChannels = drafts.filter((d) => d.status === "sent" && (d.round || 1) === lastSentRound);
 
-      let draftHtml;
-      if (!drafts.length) {
-        draftHtml = `<div class="draft-none">No draft yet</div>`;
-      } else if (!pendingChannels.length) {
-        // Both channels already actioned -- just show what was sent.
-        draftHtml = sentChannels.length
-          ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
-          : `<div class="draft-none">No pending draft</div>`;
-      } else {
-        // One dropdown to pick the channel, one textarea/button that follows
-        // whichever channel is currently selected -- not two separate boxes.
-        const byChannel = { sms: smsDraft, email: emailDraft };
-        const sentNote = sentChannels.length
-          ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} already sent</span>`).join("")}</div>`
-          : "";
-        const bodyAttrs = pendingChannels
-          .map((ch) => `data-body-${ch}="${escapeHtml(byChannel[ch].draft_body)}" data-draft-${ch}="${escapeHtml(byChannel[ch].id)}"`)
-          .join(" ");
+      // The composer offers EVERY still-pending draft (any round), deduped to
+      // the newest per channel -- so even in a Contacted view, if the other
+      // channel hasn't gone out yet, staff can still send it from here.
+      const pendById = {};
+      for (const d of drafts) if (d.status === "pending" && !pendById[d.channel]) pendById[d.channel] = d;
+      const composerChannels = ["sms", "email"].filter((ch) => pendById[ch]);
 
+      const sentNote = sentChannels.length
+        ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
+        : "";
+
+      let draftHtml;
+      if (!composerChannels.length) {
+        // Nothing left to send -- just show what's gone out (or nothing yet).
+        draftHtml = sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`);
+      } else {
+        const bodyAttrs = composerChannels
+          .map((ch) => `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}"`)
+          .join(" ");
         // Composer is collapsed by default (native <details>) so the list
         // stays dense -- staff click "Review & send" to expand it inline.
-        const chanLabel = pendingChannels.map((c) => c.toUpperCase()).join(" / ");
+        const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
         draftHtml = `<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
-              <div class="chan-toggle" role="tablist">${pendingChannels
+              <div class="chan-toggle" role="tablist">${composerChannels
                 .map((ch, i) => `<button type="button" class="chan-btn${i === 0 ? " active" : ""}" data-ch="${ch}">${ch.toUpperCase()}</button>`)
                 .join("")}</div>
               <span class="draft-hint">pick a channel &amp; edit before sending</span>
             </div>
-            <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
-            <button class="approve-btn">${IC_SEND}<span>Send <b class="send-ch">${pendingChannels[0].toUpperCase()}</b></span></button>
+            <textarea class="draft-textarea">${escapeHtml(pendById[composerChannels[0]].draft_body)}</textarea>
+            <button class="approve-btn">${IC_SEND}<span>Send <b class="send-ch">${composerChannels[0].toUpperCase()}</b></span></button>
             ${sentNote}
           </div>
         </details>`;
