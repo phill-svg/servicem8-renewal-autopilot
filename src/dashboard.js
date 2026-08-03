@@ -285,32 +285,42 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
 
+  // regardingJobUuid kept (needed so the customer's reply threads back into
+  // that job in ServiceM8, and for the "reply here" link ServiceM8 appends
+  // to the SMS footer). ServiceM8 can reject a send as a duplicate
+  // ("SMS Message has already been sent (Not sending again)", errorCode 405)
+  // when it considers this an exact repeat -- treated as a soft-success
+  // below rather than a hard failure, since it means the message already
+  // went out functionally; don't leave a draft stuck as "failed" (and
+  // re-sendable) for something the customer already received.
   try {
-    // regardingJobUuid deliberately omitted -- confirmed live (2026-08-03)
-    // that ServiceM8 silently rejects a send as a duplicate
-    // ("SMS Message has already been sent (Not sending again)") whenever the
-    // referenced job already has ANY prior message logged against it, which
-    // is common for a customer's last completed job in normal business use.
-    // Omitting it avoids the false-positive dedup at the cost of the message
-    // not being tied to a specific job in ServiceM8's own UI.
     if (draft.channel === "sms") {
       await sendPlatformSms(env, tenantId, {
         to: dueCustomer.contact_phone_cache,
         message: body,
+        regardingJobUuid: dueCustomer.last_job_uuid,
       });
     } else {
       await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
         subject: draft.draft_subject || "Time for your next pest treatment",
         textBody: body,
+        regardingJobUuid: dueCustomer.last_job_uuid,
       });
     }
     await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
       .bind(body, Date.now(), Date.now(), draftId)
       .run();
   } catch (err) {
+    const message = String(err && err.message);
+    if (message.includes("has already been sent")) {
+      await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
+        .bind(body, Date.now(), Date.now(), draftId)
+        .run();
+      return;
+    }
     await env.DB.prepare("UPDATE reminder_drafts SET status = 'failed', draft_body = ?, error = ?, reviewed_at = ? WHERE id = ?")
-      .bind(body, String(err && err.message), Date.now(), draftId)
+      .bind(body, message, Date.now(), draftId)
       .run();
     throw err;
   }
