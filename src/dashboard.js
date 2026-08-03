@@ -3,7 +3,7 @@
 // TCB directly, now served live from this Worker and reachable via the
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
-import { escapeHtml, randomId } from "./util.js";
+import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
 import { sendPlatformSms, sendPlatformEmail, listCategories } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
@@ -33,6 +33,24 @@ function formatDateOnly(s) {
   const datePart = String(s || "").split(" ")[0];
   const [y, m, d] = datePart.split("-");
   return y && m && d ? `${d}/${m}/${y}` : datePart;
+}
+
+function formatJsDate(d) {
+  return d ? `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}` : "";
+}
+
+// A short relative-time label for the next-due date: "12d overdue" / "in 3w"
+// / "in 4mo" / "due today". Days under a fortnight stay in days, then weeks,
+// then months, so the number stays small and scannable at any range.
+function dueChipText(days) {
+  if (days == null) return "";
+  if (days === 0) return "due today";
+  const abs = Math.abs(days);
+  let n, unit;
+  if (abs < 14) { n = abs; unit = "d"; }
+  else if (abs < 60) { n = Math.round(abs / 7); unit = "w"; }
+  else { n = Math.round(abs / 30); unit = "mo"; }
+  return days < 0 ? `${n}${unit} overdue` : `in ${n}${unit}`;
 }
 
 export async function renderDashboardHtml(env, tenantId, token) {
@@ -68,6 +86,23 @@ export async function renderDashboardHtml(env, tenantId, token) {
     for (const d of drafts || []) (draftsByCustomer[d.due_customer_id] ||= []).push(d);
   }
 
+  // Each row's next-due date = last service + the tracking rule's interval.
+  // Loaded here so we can show the actual due date and a "Nd overdue / in Nd"
+  // chip per customer, not just the coarse bucket.
+  const { results: rules } = await env.DB.prepare("SELECT id, interval_months FROM category_config WHERE tenant_id = ?").bind(tenantId).all();
+  const intervalByConfig = new Map((rules || []).map((r) => [r.id, r.interval_months]));
+  const today = new Date();
+  for (const r of dueCustomers || []) {
+    const completed = parseServiceM8Date(r.last_completed_at);
+    const months = intervalByConfig.get(r.category_config_id);
+    if (completed && months) {
+      const due = new Date(completed);
+      due.setMonth(due.getMonth() + months);
+      r._dueDate = due;
+      r._daysDelta = Math.round((due.getTime() - today.getTime()) / 86400000);
+    }
+  }
+
   const allRowsData = (dueCustomers || [])
     .map((r) => {
       const drafts = draftsByCustomer[r.id] || [];
@@ -101,15 +136,21 @@ export async function renderDashboardHtml(env, tenantId, token) {
           .map((ch) => `data-body-${ch}="${escapeHtml(byChannel[ch].draft_body)}" data-draft-${ch}="${escapeHtml(byChannel[ch].id)}"`)
           .join(" ");
 
-        draftHtml = `<div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
-          <div class="draft-head">
-            <select class="channel-select">${options}</select>
-            <span class="draft-hint">edit before sending if needed</span>
+        // Composer is collapsed by default (native <details>) so the list
+        // stays dense -- staff click "Review & send" to expand it inline.
+        const chanLabel = pendingChannels.map((c) => c.toUpperCase()).join(" / ");
+        draftHtml = `<details class="draft-wrap">
+          <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
+          <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
+            <div class="draft-head">
+              <select class="channel-select">${options}</select>
+              <span class="draft-hint">edit before sending if needed</span>
+            </div>
+            <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
+            <button class="approve-btn">${IC_SEND}<span>Approve &amp; Send</span></button>
+            ${sentNote}
           </div>
-          <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
-          <button class="approve-btn">${IC_SEND}<span>Approve &amp; Send</span></button>
-          ${sentNote}
-        </div>`;
+        </details>`;
       }
 
       // A customer with drafts but none left pending has been fully actioned
@@ -145,6 +186,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
           </details>`
               : ""
           }
+        </td>
+        <td class="c-due">
+          ${r._dueDate ? `<span class="due-date">${escapeHtml(formatJsDate(r._dueDate))}</span>` : `<span class="due-date muted">&mdash;</span>`}
+          ${r._daysDelta != null ? `<span class="due-chip" style="background:${s.pillBg};color:${s.pillFg};">${escapeHtml(dueChipText(r._daysDelta))}</span>` : ""}
         </td>
         <td class="c-actions">
           <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" aria-label="Remove">&times;</button>
@@ -183,14 +228,14 @@ export async function renderDashboardHtml(env, tenantId, token) {
   body { font-family: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
   .ic { vertical-align: -1px; flex: none; }
 
-  /* top app bar */
-  .topbar { position: sticky; top: 0; z-index: 20; background: rgba(255,255,255,.85); backdrop-filter: saturate(1.6) blur(8px); border-bottom: 1px solid var(--line-2); }
-  .topbar-in { max-width: 1080px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 13px; }
-  .logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(145deg, #34d399, #15803d); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 19px; box-shadow: 0 2px 6px rgba(21,128,61,.35); flex: none; }
-  .brand-txt h1 { font-size: 16px; font-weight: 700; margin: 0; letter-spacing: -.012em; line-height: 1.1; }
-  .brand-txt .tag { font-size: 11.5px; color: var(--muted); font-weight: 500; }
-  .topbar-count { margin-left: auto; font-size: 12.5px; color: var(--muted); font-weight: 500; background: var(--surface); border: 1px solid var(--line-2); border-radius: 999px; padding: 5px 12px; box-shadow: var(--sh-sm); }
-  .topbar-count b { color: var(--ink); font-weight: 700; }
+  /* top app bar -- bold branded green */
+  .topbar { position: sticky; top: 0; z-index: 20; background: linear-gradient(100deg, #166534 0%, #15803d 45%, #16a34a 100%); box-shadow: 0 2px 10px rgba(21,128,61,.25); }
+  .topbar-in { max-width: 1080px; margin: 0 auto; padding: 13px 24px; display: flex; align-items: center; gap: 13px; }
+  .logo { width: 38px; height: 38px; border-radius: 11px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; flex: none; backdrop-filter: blur(4px); }
+  .brand-txt h1 { font-size: 16.5px; font-weight: 750; margin: 0; letter-spacing: -.015em; line-height: 1.1; color: #fff; }
+  .brand-txt .tag { font-size: 11.5px; color: rgba(255,255,255,.8); font-weight: 500; letter-spacing: .01em; }
+  .topbar-count { margin-left: auto; font-size: 12.5px; color: #fff; font-weight: 500; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 6px 13px; }
+  .topbar-count b { font-weight: 750; }
 
   .wrap { max-width: 1080px; margin: 0 auto; padding: 22px 24px 56px; }
   .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; font-weight: 500; }
@@ -213,27 +258,30 @@ export async function renderDashboardHtml(env, tenantId, token) {
 
   /* table */
   .table-wrap { overflow-x: auto; }
-  table { border-collapse: separate; border-spacing: 0 9px; width: 100%; min-width: 660px; }
+  table { border-collapse: separate; border-spacing: 0 8px; width: 100%; min-width: 780px; }
   thead th { text-align: left; padding: 0 16px 2px; color: var(--faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
   thead th:last-child { width: 48px; }
 
-  .job-row td { background: var(--surface); vertical-align: top; padding: 14px 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: box-shadow .15s ease, transform .15s ease; }
-  .job-row td:first-child { position: relative; border-left: 1px solid var(--line); border-radius: 12px 0 0 12px; padding-left: 20px; }
-  .job-row td:first-child::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 999px; background: var(--accent); }
-  .job-row td:last-child { border-right: 1px solid var(--line); border-radius: 0 12px 12px 0; }
+  .job-row td { background: var(--surface); vertical-align: top; padding: 11px 15px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: box-shadow .15s ease; }
+  .job-row td:first-child { position: relative; border-left: 1px solid var(--line); border-radius: 11px 0 0 11px; padding-left: 19px; }
+  .job-row td:first-child::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 4px; border-radius: 4px 0 0 4px; background: var(--accent); }
+  .job-row td:last-child { border-right: 1px solid var(--line); border-radius: 0 11px 11px 0; }
   .job-row:hover td { box-shadow: var(--sh-lg); border-color: var(--line-2); }
   .job-row:hover td:first-child { border-left-color: var(--line-2); }
 
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px 4px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; text-transform: uppercase; }
-  .pill .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-  .cust-name { font-weight: 650; font-size: 14px; letter-spacing: -.005em; }
-  .cust-addr { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: pre-line; line-height: 1.4; }
-  .cust-phone { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px 4px 9px; border-radius: 7px; font-size: 10.5px; font-weight: 750; letter-spacing: .03em; white-space: nowrap; text-transform: uppercase; }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .cust-name { font-weight: 700; font-size: 13.5px; letter-spacing: -.005em; }
+  .cust-addr { font-size: 11.5px; color: var(--muted); margin-top: 1px; white-space: pre-line; line-height: 1.35; }
+  .cust-phone { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12.5px; font-weight: 650; color: var(--accent); text-decoration: none; }
   .cust-phone:hover { text-decoration: underline; }
-  .svc-tag { display: inline-block; font-size: 12px; font-weight: 600; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; }
-  .c-date { white-space: nowrap; }
-  .date-val { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 550; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .svc-tag { display: inline-block; font-size: 11.5px; font-weight: 650; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; }
+  .c-date, .c-due { white-space: nowrap; }
+  .date-val { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
   .date-val .ic { color: var(--faint); }
+  .due-date { display: block; font-size: 12.5px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .due-date.muted { color: var(--faint); font-weight: 500; }
+  .due-chip { display: inline-block; margin-top: 4px; font-size: 10.5px; font-weight: 750; letter-spacing: .02em; text-transform: uppercase; border-radius: 6px; padding: 2px 7px; }
   .job-notes { margin-top: 6px; }
   .job-notes summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
   .job-notes summary:hover { color: var(--ink-2); }
@@ -246,7 +294,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .sent-chip { font-size: 11px; font-weight: 700; color: var(--brand-ink); background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
-  .draft-card { margin-top: 10px; padding: 11px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 11px; max-width: 470px; }
+  .draft-wrap { margin-top: 8px; }
+  .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
+  .draft-toggle::-webkit-details-marker { display: none; }
+  .draft-toggle:hover { background: #dcfce7; }
+  .draft-toggle .ic { color: var(--brand); }
+  .draft-wrap[open] .draft-toggle { border-radius: 8px 8px 0 0; margin-bottom: -1px; background: #fff; }
+  .draft-card { padding: 11px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 0 11px 11px 11px; max-width: 470px; }
   .draft-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .channel-select { font-size: 11.5px; font-weight: 700; letter-spacing: .03em; padding: 5px 9px; border-radius: 8px; border: 1px solid var(--line-2); background: #fff; color: var(--ink-2); cursor: pointer; }
   .draft-hint { font-size: 11.5px; color: var(--faint); }
@@ -303,7 +357,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 ${
   rows
     ? `<div class="table-wrap"><table id="due-table">
-<thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
+<thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th>Next due</th><th></th></tr></thead>
 <tbody>${rows}</tbody>
 </table></div>
 <div id="empty-filtered">No customers in this view for that service.</div>`
