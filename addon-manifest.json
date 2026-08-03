@@ -1,6 +1,7 @@
 {
   "name": "Renewal Autopilot",
   "version": "1.0",
+  "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
   "supportURL": "https://tcbpestcontrolcanberra.com.au",
   "supportEmail": "phill@tcbpestcontrolcanberra.com.au",
   "activationURL": "https://renewal-autopilot.phill-abb.workers.dev/install",
@@ -8,6 +9,14 @@
   "oauth": {
     "scope": "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email read_job_notes vendor"
   },
+  "menuItems": [
+    {
+      "name": "Renewal Autopilot",
+      "type": "addon",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "event": "open_dashboard"
+    }
+  ],
   "actions": [
     {
       "name": "Renewal Autopilot",
