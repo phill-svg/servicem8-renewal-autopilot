@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -534,6 +534,20 @@ async function handleDebugDueCustomers(request, env) {
   return json({ dueCustomers: results || [] });
 }
 
+// Admin-gated raw ServiceM8 GET passthrough, for diagnosing data issues.
+async function handleDebugRaw(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const path = url.searchParams.get("path");
+  if (!tenantId || !path) return json({ error: "?tenant= and ?path= required" }, { status: 400 });
+  try {
+    return json({ data: await rawGet(env, tenantId, path) });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 // ---- router --------------------------------------------------------------
 
 export default {
@@ -562,6 +576,7 @@ export default {
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
+    if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });

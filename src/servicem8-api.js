@@ -270,16 +270,38 @@ export async function listCategories(env, tenantId) {
   return sm8Fetch(env, tenantId, `/category.json`);
 }
 
+// A single Company record by uuid.
+export async function getCompany(env, tenantId, companyUuid) {
+  try {
+    return await sm8Fetch(env, tenantId, `/company/${companyUuid}.json`);
+  } catch (err) {
+    console.error(`getCompany failed for ${companyUuid}:`, err);
+    return null;
+  }
+}
+
 // A Company's contactable email/phone live on its Company Contact record(s),
 // not the Company itself -- confirmed in both existing repos. Prefers the
 // primary contact; falls back to the first contact with the field set.
+//
+// For an INDIVIDUAL customer (is_individual=1) ServiceM8 often stores the
+// person's name on the Company record's own `name` field with no separate
+// named contact -- so when no contact name is found, fall back to the
+// company name rather than leaving it blank (which the dashboard renders as
+// "Unknown"). Only fetches the company in that fallback case, to avoid an
+// extra API call per customer on every recompute.
 export async function getPrimaryContact(env, tenantId, companyUuid) {
   const contacts = await sm8Fetch(env, tenantId, `/companycontact.json?${odataFilter(`company_uuid eq '${companyUuid}'`)}`);
-  if (!Array.isArray(contacts) || contacts.length === 0) return null;
-  const primary = contacts.find((c) => String(c.is_primary_contact) === "1");
-  const pick = (field) => (primary && primary[field]) || (contacts.find((c) => c[field]) || {})[field] || "";
+  const list = Array.isArray(contacts) ? contacts : [];
+  const primary = list.find((c) => String(c.is_primary_contact) === "1");
+  const pick = (field) => (primary && primary[field]) || (list.find((c) => c[field]) || {})[field] || "";
+  let name = [primary?.first, primary?.last].filter(Boolean).join(" ") || list[0]?.first || "";
+  if (!name) {
+    const company = await getCompany(env, tenantId, companyUuid);
+    name = (company?.name || "").trim();
+  }
   return {
-    name: [primary?.first, primary?.last].filter(Boolean).join(" ") || contacts[0]?.first || "",
+    name,
     email: pick("email"),
     mobile: pick("mobile"),
     phone: pick("phone"),
