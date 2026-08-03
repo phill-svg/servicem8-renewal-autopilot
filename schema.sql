@@ -31,31 +31,45 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   updated_at              INTEGER NOT NULL
 );
 
--- Per-tenant, per-ServiceM8-Job-Category renewal interval configuration, set
--- during the post-install setup wizard (src/addon.js).
+-- Per-tenant renewal-tracking rule, set during the post-install setup wizard
+-- (src/addon.js). Originally category-only; generalized to also support
+-- Job Badges after discovering (2026-08-03, TCB's real account) that a
+-- staff-applied badge like "1 Year Follow-up" is a far more deliberate
+-- "this job counts toward renewal" signal than category -- category tells
+-- you what kind of job it was, not whether it's on the recurring program.
+-- A tenant can have multiple rules active at once (e.g. a badge-based
+-- general rule plus a separate category-based termite-inspection rule).
 CREATE TABLE IF NOT EXISTS category_config (
   id                       TEXT PRIMARY KEY,
   tenant_id                TEXT NOT NULL REFERENCES tenants(servicem8_account_uuid),
-  servicem8_category_uuid  TEXT NOT NULL,
-  category_name_cache      TEXT,
+  signal_type              TEXT NOT NULL DEFAULT 'category', -- 'category' | 'badge'
+  servicem8_category_uuid  TEXT, -- set when signal_type = 'category'
+  servicem8_badge_uuid     TEXT, -- set when signal_type = 'badge'
+  category_name_cache      TEXT, -- display label regardless of signal_type
   interval_months          INTEGER NOT NULL,
   due_soon_lead_days       INTEGER NOT NULL DEFAULT 30,
   overdue_grace_days       INTEGER NOT NULL DEFAULT 14,
-  is_tracked               INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(tenant_id, servicem8_category_uuid)
+  is_tracked               INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_category_config_tenant ON category_config(tenant_id);
 
 -- Computed output of the due-detection engine (src/due-engine.js). Upserted
 -- on every engine run (webhook-triggered or nightly cron); UNIQUE constraint
--- means re-running is idempotent, not a source of duplicate rows.
+-- means re-running is idempotent, not a source of duplicate rows. Keyed by
+-- category_config_id rather than the job's raw category/badge uuid -- for a
+-- badge-based rule, the *actual* category of "the most recent qualifying
+-- job" can change from one recompute to the next (this month's could be
+-- Premium Pest, next month's Termite Management), so the rule's own id is
+-- the only stable dedupe key; servicem8_category_uuid becomes a display-only
+-- cache of that job's real category.
 CREATE TABLE IF NOT EXISTS due_customers (
   id                       TEXT PRIMARY KEY,
   tenant_id                TEXT NOT NULL REFERENCES tenants(servicem8_account_uuid),
+  category_config_id       TEXT NOT NULL REFERENCES category_config(id),
   servicem8_company_uuid   TEXT NOT NULL,
   address_key              TEXT NOT NULL, -- normalized street-address-only dedupe key
   address_display          TEXT,
-  servicem8_category_uuid  TEXT NOT NULL,
+  servicem8_category_uuid  TEXT, -- cached: the triggering job's real category, for display only
   last_job_uuid            TEXT,
   last_completed_at        TEXT,
   bucket                   TEXT NOT NULL, -- due_soon | due | overdue
@@ -64,7 +78,7 @@ CREATE TABLE IF NOT EXISTS due_customers (
   contact_email_cache      TEXT,
   contact_phone_cache      TEXT,
   computed_at              INTEGER NOT NULL,
-  UNIQUE(tenant_id, servicem8_company_uuid, address_key, servicem8_category_uuid)
+  UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);
 

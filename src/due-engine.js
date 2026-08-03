@@ -10,7 +10,16 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listOpenJobsForCompany, getPrimaryContact } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact } from "./servicem8-api.js";
+
+// Dispatches a tracking rule to the right job-fetch strategy. See
+// schema.sql's category_config comment for why a rule can be either kind.
+async function fetchJobsForRule(env, tenantId, rule, { before } = {}) {
+  if (rule.signal_type === "badge") {
+    return listCompletedJobsForBadge(env, tenantId, rule.servicem8_badge_uuid, { before });
+  }
+  return listCompletedJobsForCategory(env, tenantId, rule.servicem8_category_uuid, { before });
+}
 
 const BACKFILL_CHUNK_DAYS = 180; // ~6 months per chunk, keeps each API call and D1 batch bounded
 
@@ -49,7 +58,7 @@ function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays) {
 // computeDueForTenant so a large tenant's full history is never fetched in
 // one Worker invocation.
 export async function backfillChunk(env, tenant) {
-  const categories = await env.DB.prepare(
+  const rules = await env.DB.prepare(
     "SELECT * FROM category_config WHERE tenant_id = ? AND is_tracked = 1"
   )
     .bind(tenant.servicem8_account_uuid)
@@ -59,12 +68,10 @@ export async function backfillChunk(env, tenant) {
   const chunkStart = addDays(cursor, -BACKFILL_CHUNK_DAYS);
 
   let sawAnyJob = false;
-  for (const cat of categories.results || []) {
-    const jobs = await listCompletedJobsForCategory(env, tenant.servicem8_account_uuid, cat.servicem8_category_uuid, {
-      before: isoDate(cursor),
-    });
+  for (const rule of rules.results || []) {
+    const jobs = await fetchJobsForRule(env, tenant.servicem8_account_uuid, rule, { before: isoDate(cursor) });
     if (Array.isArray(jobs) && jobs.length) sawAnyJob = true;
-    await upsertJobsAsDueCandidates(env, tenant.servicem8_account_uuid, cat, jobs || []);
+    await upsertJobsAsDueCandidates(env, tenant.servicem8_account_uuid, rule, jobs || []);
   }
 
   const now = Date.now();
@@ -87,7 +94,7 @@ export async function backfillChunk(env, tenant) {
 // Groups raw jobs by (company_uuid, normalized street address), keeps the
 // most-recently-completed job per group, and upserts a candidate row --
 // shared by both the backfill path and the live webhook-triggered path.
-async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
+async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   const groups = new Map();
   for (const job of jobs) {
     const completedAt = parseServiceM8Date(job.completion_date);
@@ -101,8 +108,8 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
 
   const today = new Date();
   for (const [, { job, completedAt, addressKey }] of groups) {
-    const dueDate = addMonths(completedAt, category.interval_months);
-    const bucket = bucketFor(today, dueDate, category.due_soon_lead_days, category.overdue_grace_days);
+    const dueDate = addMonths(completedAt, rule.interval_months);
+    const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days);
     if (!bucket) continue; // not due yet -- don't create noise rows for every customer, only actionable ones
 
     let suppressedReason = null;
@@ -126,14 +133,17 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
     const now = Date.now();
     // RETURNING id -- ON CONFLICT DO UPDATE keeps the row's *original* id, not
     // the freshly generated one bound below, so the id used for the reminder
-    // draft lookup must come from what SQLite actually persisted.
+    // draft lookup must come from what SQLite actually persisted. Keyed by
+    // rule.id, not the job's category -- see schema.sql's comment on why a
+    // badge-based rule's "current" category can change between recomputes.
     const row = await env.DB.prepare(
       `INSERT INTO due_customers (
-         id, tenant_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
+         id, tenant_id, category_config_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
          last_job_uuid, last_completed_at, bucket, suppressed_reason,
          contact_name_cache, contact_email_cache, contact_phone_cache, computed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, servicem8_category_uuid) DO UPDATE SET
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, category_config_id) DO UPDATE SET
+         servicem8_category_uuid = excluded.servicem8_category_uuid,
          last_job_uuid = excluded.last_job_uuid,
          last_completed_at = excluded.last_completed_at,
          bucket = excluded.bucket,
@@ -147,10 +157,11 @@ async function upsertJobsAsDueCandidates(env, tenantId, category, jobs) {
       .bind(
         randomId(),
         tenantId,
+        rule.id,
         job.company_uuid,
         addressKey,
         job.job_address || "",
-        category.servicem8_category_uuid,
+        job.category_uuid || null,
         job.uuid,
         job.completion_date,
         bucket,
@@ -205,13 +216,13 @@ async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
     .run();
 }
 
-// Full recompute for one category on one tenant -- used by the live
+// Full recompute for one rule on one tenant -- used by the live
 // webhook-triggered path (a single job.completed doesn't need a backfill
-// chunk, it needs this category's candidates refreshed) and by the nightly
+// chunk, it needs this rule's candidates refreshed) and by the nightly
 // reconciliation cron as the source-of-truth backstop.
-export async function recomputeCategory(env, tenantId, categoryConfigRow) {
-  const jobs = await listCompletedJobsForCategory(env, tenantId, categoryConfigRow.servicem8_category_uuid);
-  await upsertJobsAsDueCandidates(env, tenantId, categoryConfigRow, jobs || []);
+export async function recomputeCategory(env, tenantId, rule) {
+  const jobs = await fetchJobsForRule(env, tenantId, rule);
+  await upsertJobsAsDueCandidates(env, tenantId, rule, jobs || []);
 }
 
 export async function recomputeAllCategoriesForTenant(env, tenantId) {
@@ -219,10 +230,10 @@ export async function recomputeAllCategoriesForTenant(env, tenantId) {
     .bind(tenantId)
     .all();
   let jobsScanned = 0;
-  for (const cat of results || []) {
-    const jobs = await listCompletedJobsForCategory(env, tenantId, cat.servicem8_category_uuid);
+  for (const rule of results || []) {
+    const jobs = await fetchJobsForRule(env, tenantId, rule);
     jobsScanned += (jobs || []).length;
-    await upsertJobsAsDueCandidates(env, tenantId, cat, jobs || []);
+    await upsertJobsAsDueCandidates(env, tenantId, rule, jobs || []);
   }
   return { jobsScanned };
 }

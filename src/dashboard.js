@@ -4,7 +4,7 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId } from "./util.js";
-import { sendPlatformSms, sendPlatformEmail } from "./servicem8-api.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories } from "./servicem8-api.js";
 
 const STYLE = {
   overdue: { bg: "#fde2e1", border: "#c41613", label: "Overdue", text: "#7a0e0c" },
@@ -18,15 +18,26 @@ function telHref(p) {
 
 export async function renderDashboardHtml(env, tenantId, token) {
   const { results: dueCustomers } = await env.DB.prepare(
-    `SELECT dc.*, cc.category_name_cache AS service_name
-     FROM due_customers dc
-     LEFT JOIN category_config cc
-       ON cc.tenant_id = dc.tenant_id AND cc.servicem8_category_uuid = dc.servicem8_category_uuid
-     WHERE dc.tenant_id = ? AND dc.suppressed_reason IS NULL
-     ORDER BY dc.bucket, dc.last_completed_at`
+    `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL ORDER BY bucket, last_completed_at`
   )
     .bind(tenantId)
     .all();
+
+  // Service name shown per row is the *actual job's* real category (e.g.
+  // "Premium Pest Treatment"), not the tracking rule's own label -- a
+  // badge-based rule's label is just "1 Year Follow-up", which doesn't tell
+  // staff what kind of service it was. Live lookup rather than a stored
+  // column since categories can be renamed in ServiceM8 at any time.
+  let categoryNameByUuid = {};
+  try {
+    const categories = await listCategories(env, tenantId);
+    for (const c of categories || []) categoryNameByUuid[c.uuid] = c.name;
+  } catch (err) {
+    console.error(`dashboard: failed to load categories for tenant ${tenantId}`, err);
+  }
+  for (const r of dueCustomers || []) {
+    r.service_name = categoryNameByUuid[r.servicem8_category_uuid] || "Unknown";
+  }
 
   const draftsByCustomer = {};
   if (dueCustomers && dueCustomers.length) {
@@ -63,7 +74,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
             .join("")
         : `<div style="margin-top:6px;font-size:12px;color:#999;">No draft yet</div>`;
 
-      return `<tr style="background:${s.bg};border-left:4px solid ${s.border}">
+      return `<tr data-service="${escapeHtml(r.service_name)}" style="background:${s.bg};border-left:4px solid ${s.border}">
         <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
         <td style="padding:10px;vertical-align:top;">
           <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -77,6 +88,9 @@ export async function renderDashboardHtml(env, tenantId, token) {
     })
     .join("\n");
 
+  const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
+  const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Renewal Autopilot</title>
 <style>
@@ -87,21 +101,46 @@ export async function renderDashboardHtml(env, tenantId, token) {
   th { text-align: left; padding: 10px; background: #2b2b30; color: #fff; font-size: 12px; text-transform: uppercase; }
   .legend span { display:inline-flex; align-items:center; gap:6px; margin-right:18px; font-size:13px; }
   .swatch { width:14px; height:14px; display:inline-block; }
+  .toolbar { margin-bottom: 14px; display:flex; align-items:center; gap:8px; }
+  .toolbar select { padding:6px 10px; border-radius:4px; border:1px solid #ccc; font-size:13px; }
+  #empty-filtered { display:none; padding:20px; text-align:center; color:#999; background:#fff; }
 </style>
 </head>
 <body>
 <h1>Renewal Autopilot</h1>
-<div class="sub">${(dueCustomers || []).length} customer(s) due for renewal</div>
+<div class="sub" id="sub-count">${(dueCustomers || []).length} customer(s) due for renewal</div>
 <div class="legend">
   <span><span class="swatch" style="background:${STYLE.overdue.bg};border-left:4px solid ${STYLE.overdue.border}"></span>Overdue (${counts.overdue})</span>
   <span><span class="swatch" style="background:${STYLE.due.bg};border-left:4px solid ${STYLE.due.border}"></span>Due now (${counts.due})</span>
   <span><span class="swatch" style="background:${STYLE.due_soon.bg};border-left:4px solid ${STYLE.due_soon.border}"></span>Due soon (${counts.due_soon})</span>
 </div>
+<div class="toolbar">
+  <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
+  <select id="service-filter">
+    <option value="">All services (${(dueCustomers || []).length})</option>
+    ${filterOptions}
+  </select>
+</div>
 <table>
 <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
 </table>
+<div id="empty-filtered">No customers due for this service.</div>
 <script>
+  var filterSelect = document.getElementById('service-filter');
+  var allRows = Array.prototype.slice.call(document.querySelectorAll('table tbody tr[data-service]'));
+  filterSelect.addEventListener('change', function () {
+    var value = filterSelect.value;
+    var visibleCount = 0;
+    allRows.forEach(function (row) {
+      var match = !value || row.dataset.service === value;
+      row.style.display = match ? '' : 'none';
+      if (match) visibleCount++;
+    });
+    document.getElementById('sub-count').textContent = visibleCount + ' customer(s) due for renewal' + (value ? ' -- ' + value : '');
+    document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
+  });
+
   document.querySelectorAll('.approve-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       btn.disabled = true;

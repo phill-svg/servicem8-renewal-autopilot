@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -171,17 +171,24 @@ async function handleJobWebhook(env, tenantId, jobUuid) {
     console.error(`webhook: failed to fetch job ${jobUuid} for tenant ${tenantId}`, err);
     return;
   }
-  if (!job || job.status !== "Completed" || !job.category_uuid) return;
+  if (!job || job.status !== "Completed") return;
 
-  const category = await env.DB.prepare(
-    "SELECT * FROM category_config WHERE tenant_id = ? AND servicem8_category_uuid = ? AND is_tracked = 1"
-  )
-    .bind(tenantId, job.category_uuid)
-    .first();
-  if (!category) return; // this job's category isn't configured for tracking
+  // A job can match a category-based rule (by job.category_uuid) or a
+  // badge-based rule (by job.badges including the rule's badge) -- check
+  // every tracked rule for this tenant rather than a single indexed lookup,
+  // since which rules exist and what they key on is per-tenant config.
+  const { results: rules } = await env.DB.prepare("SELECT * FROM category_config WHERE tenant_id = ? AND is_tracked = 1")
+    .bind(tenantId)
+    .all();
+  const matchingRules = (rules || []).filter((rule) =>
+    rule.signal_type === "badge"
+      ? Array.isArray(job.badges) && job.badges.includes(rule.servicem8_badge_uuid)
+      : job.category_uuid === rule.servicem8_category_uuid
+  );
+  if (!matchingRules.length) return; // this job doesn't match any tracked rule
 
   try {
-    await recomputeCategory(env, tenantId, category);
+    for (const rule of matchingRules) await recomputeCategory(env, tenantId, rule);
   } catch (err) {
     console.error(`webhook: recompute failed for tenant ${tenantId}, category ${job.category_uuid}`, err);
   }
@@ -413,19 +420,37 @@ async function handleDebugCategories(request, env) {
   }
 }
 
+// Configures a tracking rule -- either signalType "category" (categoryUuid)
+// or "badge" (badgeUuid). No DB-level unique constraint on the target uuid
+// since a tenant may have several rules of either kind; upsert is done by
+// hand (look up an existing rule for this exact signal, update it, else
+// insert) rather than relying on ON CONFLICT.
 async function handleDebugConfigureCategory(request, env) {
-  const { tenant, categoryUuid, categoryName, intervalMonths } = await readJson(request);
-  if (!tenant || !categoryUuid || !intervalMonths) {
-    return json({ error: "tenant, categoryUuid, intervalMonths required" }, { status: 400 });
+  const { tenant, categoryUuid, badgeUuid, categoryName, intervalMonths } = await readJson(request);
+  const signalType = badgeUuid ? "badge" : "category";
+  const targetUuid = badgeUuid || categoryUuid;
+  if (!tenant || !targetUuid || !intervalMonths) {
+    return json({ error: "tenant, (categoryUuid or badgeUuid), intervalMonths required" }, { status: 400 });
   }
-  await env.DB.prepare(
-    `INSERT INTO category_config (id, tenant_id, servicem8_category_uuid, category_name_cache, interval_months)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(tenant_id, servicem8_category_uuid) DO UPDATE SET
-       interval_months = excluded.interval_months, category_name_cache = excluded.category_name_cache`
+
+  const existing = await env.DB.prepare(
+    `SELECT id FROM category_config WHERE tenant_id = ? AND signal_type = ? AND (servicem8_category_uuid = ? OR servicem8_badge_uuid = ?)`
   )
-    .bind(randomId(), tenant, categoryUuid, categoryName || "", intervalMonths)
-    .run();
+    .bind(tenant, signalType, targetUuid, targetUuid)
+    .first();
+
+  if (existing) {
+    await env.DB.prepare(`UPDATE category_config SET interval_months = ?, category_name_cache = ? WHERE id = ?`)
+      .bind(intervalMonths, categoryName || "", existing.id)
+      .run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO category_config (id, tenant_id, signal_type, servicem8_category_uuid, servicem8_badge_uuid, category_name_cache, interval_months)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(randomId(), tenant, signalType, signalType === "category" ? targetUuid : null, signalType === "badge" ? targetUuid : null, categoryName || "", intervalMonths)
+      .run();
+  }
   return json({ ok: true });
 }
 
@@ -485,6 +510,19 @@ async function handleDebugReclassifyStandard(request, env) {
     }
   }
   return json({ results });
+}
+
+async function handleDebugRaw(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const path = url.searchParams.get("path");
+  if (!tenantId || !path) return json({ error: "?tenant= and ?path= required" }, { status: 400 });
+  try {
+    const data = await rawGet(env, tenantId, path);
+    return json({ data });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
 }
 
 async function handleDebugSampleJobs(request, env) {
@@ -594,6 +632,7 @@ export default {
     if (pathname === "/debug/category-breakdown" && method === "GET") return handleDebugCategoryBreakdown(request, env);
     if (pathname === "/debug/sample-jobs" && method === "GET") return handleDebugSampleJobs(request, env);
     if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
+    if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {

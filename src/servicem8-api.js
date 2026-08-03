@@ -62,6 +62,12 @@ export async function getJob(env, tenantId, jobUuid) {
   return sm8Fetch(env, tenantId, `/job/${jobUuid}.json`);
 }
 
+// Raw passthrough for one-off investigation (see /debug/raw) -- not part of
+// the live due-detection path.
+export async function rawGet(env, tenantId, pathAndQuery) {
+  return sm8Fetch(env, tenantId, pathAndQuery);
+}
+
 // Updates fields on an existing job -- ServiceM8's REST convention is POST to
 // the record's own .json URL with only the changed fields (same shape as
 // creating, per their docs). Used for one-off historical-data cleanup (see
@@ -81,11 +87,38 @@ export async function listCompletedJobsForCategory(env, tenantId, categoryUuid, 
   return sm8Fetch(env, tenantId, `/job.json?${odataFilter(clauses.join(" and "))}`);
 }
 
-// All completed jobs regardless of category -- used by the debug category
-// breakdown to show which category labels actually appear on real historical
-// jobs, since a tenant's category naming/tagging can't be assumed up front.
-export async function listAllCompletedJobs(env, tenantId) {
-  return sm8Fetch(env, tenantId, `/job.json?${odataFilter(`status eq 'Completed'`)}`);
+// All completed jobs regardless of category, optionally chunked by
+// completion date like listCompletedJobsForCategory. Used by the debug
+// category breakdown, and by badge-based rules -- ServiceM8's `badges` field
+// is a JSON array embedded on the job record, not a separately filterable
+// object, so badge matching has to happen client-side over the full list
+// (see listCompletedJobsForBadge below).
+export async function listAllCompletedJobs(env, tenantId, { before } = {}) {
+  const clauses = [`status eq 'Completed'`];
+  if (before) clauses.push(`completion_date lt '${before}'`);
+  return sm8Fetch(env, tenantId, `/job.json?${odataFilter(clauses.join(" and "))}`);
+}
+
+// ServiceM8 sends `badges` as a JSON-*encoded string* (e.g. `'["uuid1","uuid2"]'`),
+// not a real array, on both list and single-job responses -- confirmed live
+// (2026-08-03). Parse defensively; a malformed/empty value just means no badges.
+function parseBadges(badgesField) {
+  if (Array.isArray(badgesField)) return badgesField;
+  if (typeof badgesField !== "string" || !badgesField) return [];
+  try {
+    const parsed = JSON.parse(badgesField);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Completed jobs carrying a specific Job Badge -- no dedicated filterable
+// endpoint for the job/badge relationship, so this fetches the (optionally
+// date-chunked) completed-jobs list and filters client-side.
+export async function listCompletedJobsForBadge(env, tenantId, badgeUuid, { before } = {}) {
+  const jobs = await listAllCompletedJobs(env, tenantId, { before });
+  return (jobs || []).filter((j) => parseBadges(j.badges).includes(badgeUuid));
 }
 
 // Open (in-pipeline) jobs for a company -- used by the due-engine's
