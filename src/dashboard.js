@@ -126,9 +126,6 @@ export async function renderDashboardHtml(env, tenantId, token) {
         // One dropdown to pick the channel, one textarea/button that follows
         // whichever channel is currently selected -- not two separate boxes.
         const byChannel = { sms: smsDraft, email: emailDraft };
-        const options = pendingChannels
-          .map((ch) => `<option value="${ch}">${ch.toUpperCase()}</option>`)
-          .join("");
         const sentNote = sentChannels.length
           ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} already sent</span>`).join("")}</div>`
           : "";
@@ -143,11 +140,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
-              <select class="channel-select">${options}</select>
-              <span class="draft-hint">edit before sending if needed</span>
+              <div class="chan-toggle" role="tablist">${pendingChannels
+                .map((ch, i) => `<button type="button" class="chan-btn${i === 0 ? " active" : ""}" data-ch="${ch}">${ch.toUpperCase()}</button>`)
+                .join("")}</div>
+              <span class="draft-hint">pick a channel &amp; edit before sending</span>
             </div>
             <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
-            <button class="approve-btn">${IC_SEND}<span>Approve &amp; Send</span></button>
+            <button class="approve-btn">${IC_SEND}<span>Send <b class="send-ch">${pendingChannels[0].toUpperCase()}</b></span></button>
             ${sentNote}
           </div>
         </details>`;
@@ -301,9 +300,14 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-toggle .ic { color: var(--brand); }
   .draft-wrap[open] .draft-toggle { border-radius: 8px 8px 0 0; margin-bottom: -1px; background: #fff; }
   .draft-card { padding: 11px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 0 11px 11px 11px; max-width: 470px; }
-  .draft-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .channel-select { font-size: 11.5px; font-weight: 700; letter-spacing: .03em; padding: 5px 9px; border-radius: 8px; border: 1px solid var(--line-2); background: #fff; color: var(--ink-2); cursor: pointer; }
+  .draft-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; flex-wrap: wrap; }
+  .chan-toggle { display: inline-flex; background: #eef1f4; border-radius: 8px; padding: 3px; gap: 2px; }
+  .chan-btn { border: none; background: none; font-size: 11px; font-weight: 750; letter-spacing: .04em; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; transition: all .12s; }
+  .chan-btn:hover { color: var(--ink-2); }
+  .chan-btn.active { background: #fff; color: var(--brand-ink); box-shadow: var(--sh-sm); }
+  .chan-btn:disabled { opacity: .5; cursor: default; }
   .draft-hint { font-size: 11.5px; color: var(--faint); }
+  .approve-btn .send-ch { font-weight: 800; letter-spacing: .04em; }
   .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.5; padding: 10px 11px; border: 1px solid var(--line-2); border-radius: 9px; resize: vertical; min-height: 5.2em; margin-bottom: 9px; color: var(--ink); background: #fff; transition: border-color .12s, box-shadow .12s; }
   .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.13); }
   .approve-btn { display: inline-flex; align-items: center; gap: 7px; background: var(--brand); color: #fff; border: none; border-radius: 9px; padding: 9px 16px; font-size: 12.5px; font-weight: 650; cursor: pointer; box-shadow: 0 1px 2px rgba(21,128,61,.35); transition: background .13s, transform .06s; }
@@ -414,26 +418,32 @@ ${
   applyFilters();
 
   document.querySelectorAll('.draft-card').forEach(function (card) {
-    var select = card.querySelector('.channel-select');
+    var chanBtns = Array.prototype.slice.call(card.querySelectorAll('.chan-btn'));
     var textarea = card.querySelector('.draft-textarea');
+    var sendCh = card.querySelector('.send-ch');
     var editedByChannel = {};
+    var current = chanBtns.length ? chanBtns[0].dataset.ch : 'sms';
 
     function loadChannel(ch) {
       textarea.value = editedByChannel[ch] !== undefined ? editedByChannel[ch] : (card.dataset['body' + ch.charAt(0).toUpperCase() + ch.slice(1)] || '');
+      if (sendCh) sendCh.textContent = ch.toUpperCase();
     }
-    select.addEventListener('change', function () {
-      loadChannel(select.value);
+    chanBtns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        chanBtns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        current = b.dataset.ch;
+        loadChannel(current);
+      });
     });
-    textarea.addEventListener('input', function () {
-      editedByChannel[select.value] = textarea.value;
-    });
+    textarea.addEventListener('input', function () { editedByChannel[current] = textarea.value; });
 
     var btn = card.querySelector('.approve-btn');
     btn.addEventListener('click', async function () {
-      var ch = select.value;
+      var ch = current;
       var draftId = card.dataset['draft' + ch.charAt(0).toUpperCase() + ch.slice(1)];
       btn.disabled = true;
-      select.disabled = true;
+      chanBtns.forEach(function (x) { x.disabled = true; });
       btn.textContent = 'Sending...';
       try {
         const res = await fetch('/dashboard/approve', {
@@ -441,8 +451,8 @@ ${
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value }),
         });
-        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; select.disabled = false; }
-      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; select.disabled = false; }
+        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
+      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
     });
   });
 
