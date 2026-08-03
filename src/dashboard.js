@@ -6,12 +6,15 @@
 import { escapeHtml, randomId } from "./util.js";
 import { sendPlatformSms, sendPlatformEmail, listCategories } from "./servicem8-api.js";
 
+// Per-status palette. `accent` drives the row's left rail + phone link,
+// `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
+// red=overdue, orange=due now, amber=due soon, blue=due later, green=done.
 const STYLE = {
-  overdue: { bg: "#fde2e1", border: "#c41613", label: "Overdue", text: "#7a0e0c" },
-  due: { bg: "#ffe9d6", border: "#c2660a", label: "Due now", text: "#7a3d05" },
-  due_soon: { bg: "#fff6d6", border: "#a68b00", label: "Due soon", text: "#6b5900" },
-  due_later: { bg: "#e8f0fe", border: "#3a6bc4", label: "Due later", text: "#254d8f" },
-  contacted: { bg: "#e6f4ea", border: "#2e7d32", label: "Contacted", text: "#1b5e20" },
+  overdue: { accent: "#dc2626", bg: "#fef4f4", pillBg: "#fee2e2", pillFg: "#991b1b", label: "Overdue" },
+  due: { accent: "#ea580c", bg: "#fff8f2", pillBg: "#ffedd5", pillFg: "#9a3412", label: "Due now" },
+  due_soon: { accent: "#d97706", bg: "#fffcf3", pillBg: "#fef3c7", pillFg: "#92400e", label: "Due soon" },
+  due_later: { accent: "#2563eb", bg: "#f4f8ff", pillBg: "#dbeafe", pillFg: "#1e40af", label: "Due later" },
+  contacted: { accent: "#16a34a", bg: "#f4fdf6", pillBg: "#dcfce7", pillFg: "#166534", label: "Contacted" },
 };
 
 function telHref(p) {
@@ -72,12 +75,12 @@ export async function renderDashboardHtml(env, tenantId, token) {
 
       let draftHtml;
       if (!drafts.length) {
-        draftHtml = `<div style="margin-top:6px;font-size:12px;color:#999;">No draft yet</div>`;
+        draftHtml = `<div class="draft-none">No draft yet</div>`;
       } else if (!pendingChannels.length) {
         // Both channels already actioned -- just show what was sent.
         draftHtml = sentChannels.length
-          ? sentChannels.map((d) => `<div style="margin-top:6px;font-size:12px;color:#2e7d32;">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</div>`).join("")
-          : `<div style="margin-top:6px;font-size:12px;color:#999;">No pending draft</div>`;
+          ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
+          : `<div class="draft-none">No pending draft</div>`;
       } else {
         // One dropdown to pick the channel, one textarea/button that follows
         // whichever channel is currently selected -- not two separate boxes.
@@ -86,19 +89,19 @@ export async function renderDashboardHtml(env, tenantId, token) {
           .map((ch) => `<option value="${ch}">${ch.toUpperCase()}</option>`)
           .join("");
         const sentNote = sentChannels.length
-          ? sentChannels.map((d) => `<div style="font-size:11px;color:#2e7d32;margin-top:4px;">&#10003; ${escapeHtml(d.channel.toUpperCase())} already sent</div>`).join("")
+          ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} already sent</span>`).join("")}</div>`
           : "";
         const bodyAttrs = pendingChannels
           .map((ch) => `data-body-${ch}="${escapeHtml(byChannel[ch].draft_body)}" data-draft-${ch}="${escapeHtml(byChannel[ch].id)}"`)
           .join(" ");
 
-        draftHtml = `<div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs} style="margin-top:8px;padding:8px;background:#fff;border:1px solid #e6e6ea;border-radius:4px;">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-            <select class="channel-select" style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid #ccc;">${options}</select>
-            <span style="font-size:12px;color:#666;">draft -- edit before sending if needed</span>
+        draftHtml = `<div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
+          <div class="draft-head">
+            <select class="channel-select">${options}</select>
+            <span class="draft-hint">edit before sending if needed</span>
           </div>
-          <textarea class="draft-textarea" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;min-height:4.5em;margin-bottom:6px;">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
-          <button class="approve-btn" style="background:#2b2b30;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Approve &amp; Send</button>
+          <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
+          <button class="approve-btn">Approve &amp; Send</button>
           ${sentNote}
         </div>`;
       }
@@ -117,28 +120,28 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
       const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
-      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" style="background:${s.bg};border-left:4px solid ${s.border}">
-        <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(statusLabel)}</td>
-        <td style="padding:10px;vertical-align:top;">
-          <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
-          <div style="font-size:12px;color:#666;">${escapeHtml(r.address_display || "")}</div>
-          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" style="font-size:12px;color:${s.text};">${escapeHtml(r.contact_phone_cache)}</a>` : ""}
+      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" style="--accent:${s.accent};--rowbg:${s.bg};">
+        <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};">${escapeHtml(statusLabel)}</span></td>
+        <td class="c-customer">
+          <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
+          ${r.address_display ? `<div class="cust-addr">${escapeHtml(r.address_display)}</div>` : ""}
+          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone">${escapeHtml(r.contact_phone_cache)}</a>` : ""}
           ${draftHtml}
         </td>
-        <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.service_name || "Unknown")}</td>
-        <td style="padding:10px;vertical-align:top;font-size:13px;">
-          ${escapeHtml(formatDateOnly(r.last_completed_at))}
+        <td class="c-service">${escapeHtml(r.service_name || "Unknown")}</td>
+        <td class="c-date">
+          <span class="date-val">${escapeHtml(formatDateOnly(r.last_completed_at))}</span>
           ${
             r.last_job_notes_cache
-              ? `<details style="margin-top:4px;">
-            <summary style="cursor:pointer;font-size:11px;color:#888;">Show job</summary>
-            <div style="font-size:12px;color:#555;margin-top:4px;max-width:220px;">${escapeHtml(r.last_job_notes_cache)}</div>
+              ? `<details class="job-notes">
+            <summary>Show job</summary>
+            <div class="job-notes-body">${escapeHtml(r.last_job_notes_cache)}</div>
           </details>`
               : ""
           }
         </td>
-        <td style="padding:10px;vertical-align:top;text-align:center;">
-          <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
+        <td class="c-actions">
+          <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" aria-label="Remove">&times;</button>
         </td>
       </tr>`;
       return { html, tabBucket };
@@ -161,32 +164,94 @@ export async function renderDashboardHtml(env, tenantId, token) {
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Renewal Autopilot</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Renewal Autopilot</title>
 <style>
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 24px; color: #222; background: #fafafa; }
-  h1 { font-size: 20px; margin-bottom: 4px; }
-  .sub { color: #666; font-size: 13px; margin-bottom: 18px; }
-  table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-  th { text-align: left; padding: 10px; background: #2b2b30; color: #fff; font-size: 12px; text-transform: uppercase; }
-  .tabs { display:flex; gap:0; margin-bottom:0; border-bottom:2px solid #e6e6ea; }
-  .tab-btn { background:none; border:none; padding:10px 18px; font-size:13px; font-weight:600; color:#666; cursor:pointer; border-bottom:3px solid transparent; margin-bottom:-2px; }
-  .tab-btn.active { color:#222; border-bottom-color:#2b2b30; }
-  .contacted-dd { margin-left:12px; align-self:center; padding:6px 8px; border-radius:4px; border:1px solid #ccc; font-size:13px; font-weight:600; color:#666; background:#fff; cursor:pointer; }
-  .contacted-dd.active { color:#1b5e20; border-color:#2e7d32; }
-  .toolbar { margin: 14px 0; display:flex; align-items:center; gap:8px; }
-  .toolbar select { padding:6px 10px; border-radius:4px; border:1px solid #ccc; font-size:13px; }
-  #empty-filtered { display:none; padding:20px; text-align:center; color:#999; background:#fff; }
+  :root {
+    --bg: #f5f6f8; --surface: #ffffff; --ink: #1f2430; --muted: #6b7280;
+    --line: #e6e8ec; --brand: #16a34a; --brand-ink: #166534; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.05);
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 20px 20px 48px; }
+
+  header.app { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  .logo { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(140deg, #22c55e, #15803d); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 18px; box-shadow: var(--shadow); flex: none; }
+  h1 { font-size: 19px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 2px 0 18px; }
+
+  .tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 0; }
+  .tab-btn { background: none; border: none; padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 8px 8px 0 0; border-bottom: 2.5px solid transparent; margin-bottom: -1px; transition: color .12s, background .12s; }
+  .tab-btn:hover { color: var(--ink); background: rgba(0,0,0,.03); }
+  .tab-btn.active { color: var(--ink); border-bottom-color: var(--ink); }
+  .contacted-dd { margin-left: 8px; align-self: center; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--shadow); }
+  .contacted-dd:hover { border-color: #cfd3d9; }
+  .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #f0fdf4; }
+
+  .toolbar { margin: 16px 0; display: flex; align-items: center; gap: 8px; }
+  .toolbar label { font-size: 13px; color: var(--muted); }
+  .toolbar select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; background: var(--surface); box-shadow: var(--shadow); }
+
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: separate; border-spacing: 0 8px; width: 100%; min-width: 640px; }
+  thead th { text-align: left; padding: 4px 14px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  thead th:last-child { width: 44px; }
+
+  .job-row td { background: var(--rowbg); vertical-align: top; padding: 13px 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: box-shadow .12s, transform .12s; }
+  .job-row td:first-child { border-left: 4px solid var(--accent); border-radius: 10px 0 0 10px; padding-left: 14px; }
+  .job-row td:last-child { border-right: 1px solid var(--line); border-radius: 0 10px 10px 0; }
+  .job-row:hover td { box-shadow: var(--shadow); }
+
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+  .cust-name { font-weight: 650; font-size: 14px; }
+  .cust-addr { font-size: 12px; color: var(--muted); margin-top: 1px; white-space: pre-line; }
+  .cust-phone { display: inline-block; margin-top: 3px; font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .cust-phone:hover { text-decoration: underline; }
+  .c-service { font-size: 13px; color: #374151; }
+  .c-date { font-size: 13px; color: #374151; white-space: nowrap; }
+  .date-val { font-variant-numeric: tabular-nums; }
+  .job-notes { margin-top: 5px; }
+  .job-notes summary { cursor: pointer; font-size: 11px; color: var(--muted); list-style: none; user-select: none; }
+  .job-notes summary::-webkit-details-marker { display: none; }
+  .job-notes summary::before { content: "\\25B8 "; font-size: 9px; }
+  .job-notes[open] summary::before { content: "\\25BE "; }
+  .job-notes-body { font-size: 12px; color: #4b5563; margin-top: 5px; max-width: 240px; white-space: pre-line; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+
+  .draft-none { margin-top: 7px; font-size: 12px; color: #9aa0aa; }
+  .sent-row { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .sent-chip { font-size: 11.5px; font-weight: 600; color: var(--brand-ink); background: #dcfce7; border-radius: 999px; padding: 2px 9px; }
+  .draft-card { margin-top: 9px; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); max-width: 460px; }
+  .draft-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+  .channel-select { font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--line); background: #fff; }
+  .draft-hint { font-size: 12px; color: var(--muted); }
+  .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.45; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; min-height: 5em; margin-bottom: 8px; color: var(--ink); }
+  .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
+  .approve-btn { background: var(--brand); color: #fff; border: none; border-radius: 8px; padding: 8px 15px; font-size: 12.5px; font-weight: 650; cursor: pointer; transition: background .12s; }
+  .approve-btn:hover:not(:disabled) { background: #15803d; }
+  .approve-btn:disabled { opacity: .65; cursor: default; }
+
+  .dismiss-btn { background: none; border: 1px solid var(--line); border-radius: 50%; width: 26px; height: 26px; line-height: 1; font-size: 15px; color: #9aa0aa; cursor: pointer; transition: all .12s; }
+  .dismiss-btn:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+
+  .empty-state, #empty-filtered { padding: 40px 20px; text-align: center; color: var(--muted); background: var(--surface); border: 1px dashed var(--line); border-radius: 12px; font-size: 14px; }
+  #empty-filtered { display: none; margin-top: 4px; }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 16px 12px 40px; }
+    .tab-btn { padding: 8px 10px; }
+  }
 </style>
 </head>
 <body>
-<h1>Renewal Autopilot</h1>
-<div class="sub" id="sub-count">${actionableCount} customer(s) due for renewal</div>
+<div class="wrap">
+<header class="app"><div class="logo">&#8635;</div><h1>Renewal Autopilot</h1></header>
+<div class="sub" id="sub-count">${actionableCount} customer${actionableCount === 1 ? "" : "s"} due for renewal</div>
 <div class="tabs">
   <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
   <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
   <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
   <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later (${counts.due_later})</button>
-  <select id="contacted-select" class="contacted-dd">
+  <select id="contacted-select" class="contacted-dd" aria-label="View contacted customers">
     <option value="">Contacted &#9662;</option>
     <option value="contacted1">Contacted 1 (${counts.contacted1})</option>
     <option value="contacted2">Contacted 2 (${counts.contacted2})</option>
@@ -194,17 +259,21 @@ export async function renderDashboardHtml(env, tenantId, token) {
   </select>
 </div>
 <div class="toolbar">
-  <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
+  <label for="service-filter">Filter by service</label>
   <select id="service-filter">
     <option value="">All services (${(dueCustomers || []).length})</option>
     ${filterOptions}
   </select>
 </div>
-<table id="due-table">
+${
+  rows
+    ? `<div class="table-wrap"><table id="due-table">
 <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
-<tbody>${rows || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
-</table>
-<div id="empty-filtered">No customers due for this service.</div>
+<tbody>${rows}</tbody>
+</table></div>
+<div id="empty-filtered">No customers in this view for that service.</div>`
+    : `<div class="empty-state">Nothing due yet &mdash; once jobs carrying a renewal badge are completed, customers due for their next service will appear here.</div>`
+}
 
 <script>
   var filterSelect = document.getElementById('service-filter');
@@ -212,6 +281,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   var tabBtns = Array.prototype.slice.call(document.querySelectorAll('.tab-btn'));
   var activeBucket = (tabBtns.find(function (b) { return b.classList.contains('active'); }) || {}).dataset;
   activeBucket = activeBucket ? activeBucket.tabBucket : 'overdue';
+
+  var emptyFiltered = document.getElementById('empty-filtered');
 
   function applyFilters() {
     var serviceValue = filterSelect.value;
@@ -221,9 +292,9 @@ export async function renderDashboardHtml(env, tenantId, token) {
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
-    var noun = activeBucket.indexOf('contacted') === 0 ? ' customer(s) already contacted' : ' customer(s) due for renewal';
-    document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' -- ' + serviceValue : '');
-    document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
+    var noun = activeBucket.indexOf('contacted') === 0 ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
+    document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' \\u2014 ' + serviceValue : '');
+    if (emptyFiltered) emptyFiltered.style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
   }
 
   var contactedSelect = document.getElementById('contacted-select');
@@ -308,6 +379,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
     });
   });
 </script>
+</div>
 </body></html>`;
 }
 
