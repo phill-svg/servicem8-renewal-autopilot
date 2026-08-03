@@ -241,13 +241,27 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     // Real tech notes for the "Show job" teaser (src/dashboard.js) -- most
     // recent note first, since that's usually the on-site wrap-up ("No
     // issues, paid cc") rather than an earlier scheduling note.
+    //
+    // Excludes auto-logged call records from TCB's Aircall phone integration
+    // (confirmed live 2026-08-04: every one of these came from the same
+    // staff_uuid, a non-technician integration account, and reads like "Agent:
+    // Farah Emara\nrecording: https://...\nDirection: inbound" -- picking
+    // "most recent note" without this filter kept surfacing a call log from
+    // months after the visit instead of the tech's actual completion note).
+    const AIRCALL_INTEGRATION_STAFF_UUID = "88349e5a-d474-45b5-b299-23231e3c3c1b";
+    function looksLikeCallLog(note) {
+      return /recording:|^agent:|^call from|missed call from client/i.test(note || "");
+    }
     let jobNotes = "";
     try {
       const notes = await listNotesForJob(env, tenantId, job.uuid);
       if (Array.isArray(notes) && notes.length) {
         // create_date, not timestamp -- confirmed live via /debug/raw once
         // read_job_notes was granted; note.json has no `timestamp` field.
-        const sorted = [...notes].sort((a, b) => new Date(b.create_date || 0) - new Date(a.create_date || 0));
+        const realNotes = notes.filter(
+          (n) => n.edit_by_staff_uuid !== AIRCALL_INTEGRATION_STAFF_UUID && !looksLikeCallLog(n.note)
+        );
+        const sorted = [...realNotes].sort((a, b) => new Date(b.create_date || 0) - new Date(a.create_date || 0));
         jobNotes = sorted[0]?.note || "";
       }
     } catch (err) {
