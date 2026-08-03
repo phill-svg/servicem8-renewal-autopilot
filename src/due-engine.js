@@ -201,15 +201,19 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     const row = await env.DB.prepare(
       `INSERT INTO due_customers (
          id, tenant_id, category_config_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
-         last_job_uuid, last_completed_at, bucket, suppressed_reason,
+         last_job_uuid, last_completed_at, bucket, suppressed_reason, dismissed_at,
          contact_name_cache, contact_email_cache, contact_phone_cache, computed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
        ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, category_config_id) DO UPDATE SET
          servicem8_category_uuid = excluded.servicem8_category_uuid,
          last_job_uuid = excluded.last_job_uuid,
          last_completed_at = excluded.last_completed_at,
          bucket = excluded.bucket,
          suppressed_reason = excluded.suppressed_reason,
+         -- A staff dismiss only applies to the cycle it was clicked on -- once
+         -- a new completed job moves last_completed_at forward, that's a
+         -- fresh cycle, so clear it. Otherwise leave whatever's there alone.
+         dismissed_at = CASE WHEN excluded.last_completed_at != due_customers.last_completed_at THEN NULL ELSE due_customers.dismissed_at END,
          contact_name_cache = excluded.contact_name_cache,
          contact_email_cache = excluded.contact_email_cache,
          contact_phone_cache = excluded.contact_phone_cache,
@@ -241,41 +245,57 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   }
 }
 
-// Creates a draft reminder the first time a due_customers row enters an
+// Creates draft reminders the first time a due_customers row enters an
 // actionable bucket -- UNIQUE(due_customer_id, channel) makes re-running the
 // engine idempotent, so this never spams duplicate drafts on repeat runs.
 // Draft content is a sensible default until the tenant configures a real
 // template in the Phase 2 setup wizard (tenant_settings.sms_template).
+//
+// Creates a draft for BOTH sms and email whenever the corresponding contact
+// info exists, rather than only whichever channel tenant_settings.default_channel
+// picks -- staff choose which one(s) to actually approve & send per customer
+// in the dashboard, not locked into one channel account-wide.
 async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
-  const channel = settings?.default_channel || "sms";
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
 
-  const body =
-    channel === "sms"
-      ? (settings?.sms_template || "Hi {{name}}, you're due for your next service. Reply or call us to book a time.").replace(
-          "{{name}}",
-          dueCustomer.contact_name_cache || "there"
-        )
-      : (settings?.email_body_template || "Hi {{name}},\n\nYou're due for your next service. Let us know a time that suits.").replace(
-          "{{name}}",
-          dueCustomer.contact_name_cache || "there"
-        );
+  // Generic "treatment"/"service", not "spray" -- this rule covers general
+  // pest, rodent, commercial, and other job types, not just spray visits.
+  const DEFAULT_SMS =
+    "Hi {{name}}, it's been about 12 months since your last pest treatment -- time to book your next service to keep your home protected. Reply here or give us a call to book a time!";
+  const DEFAULT_EMAIL_BODY =
+    "Hi {{name}},\n\nIt's been about 12 months since your last pest treatment. Regular treatments are the best way to keep your home protected against pests all year round.\n\nReply to this email or give us a call to book your next appointment.";
 
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, draft_subject, draft_body, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
-  )
-    .bind(
-      randomId(),
-      tenantId,
-      dueCustomerId,
-      channel,
-      channel === "email" ? settings?.email_subject_template || "You're due for your next service" : null,
-      body,
-      Date.now()
+  // First name only in the message body -- contact_name_cache stores the
+  // full name (used elsewhere for staff-facing display), but "Hi Sarah" reads
+  // far more natural than "Hi Sarah Lim" in an actual reminder.
+  const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
+
+  const channels = [];
+  if (dueCustomer.contact_phone_cache) channels.push("sms");
+  if (dueCustomer.contact_email_cache) channels.push("email");
+
+  for (const channel of channels) {
+    const body =
+      channel === "sms"
+        ? (settings?.sms_template || DEFAULT_SMS).replace("{{name}}", firstName)
+        : (settings?.email_body_template || DEFAULT_EMAIL_BODY).replace("{{name}}", firstName);
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, draft_subject, draft_body, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`
     )
-    .run();
+      .bind(
+        randomId(),
+        tenantId,
+        dueCustomerId,
+        channel,
+        channel === "email" ? settings?.email_subject_template || "Time for your next pest treatment" : null,
+        body,
+        Date.now()
+      )
+      .run();
+  }
 }
 
 // Full recompute for one rule on one tenant -- used by the live

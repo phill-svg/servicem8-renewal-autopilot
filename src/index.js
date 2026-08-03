@@ -10,7 +10,7 @@ import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOp
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
-import { renderDashboardHtml, approveAndSendDraft } from "./dashboard.js";
+import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
 // ---- install / OAuth2 ------------------------------------------------
 
@@ -409,6 +409,21 @@ async function handleDashboardApprove(request, env) {
   }
 }
 
+async function handleDashboardDismiss(request, env) {
+  const { token, dueCustomerId } = await readJson(request);
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
+  if (!dueCustomerId) return json({ error: "dueCustomerId required" }, { status: 400 });
+
+  try {
+    await dismissDueCustomer(env, tenantId, dueCustomerId);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`dashboard dismiss failed for tenant ${tenantId}, due_customer ${dueCustomerId}`, err);
+    return json({ error: "could not dismiss this customer right now" }, { status: 502 });
+  }
+}
+
 // ---- Phase 1 acceptance-test debug routes ---------------------------------
 // Standing in for the Phase 2 setup wizard, which doesn't exist yet -- these
 // let us configure category tracking and run the engine manually against
@@ -549,6 +564,38 @@ async function handleDebugCreateTestBadge(request, env) {
 // starting empty.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Applies a badge to an explicit list of job UUIDs (POST body: { jobUuids: [...] })
+// -- used for the hand-reviewed "missing badge" backfill, where the target
+// set came from manual classification, not a badge-matching query.
+async function handleDebugApplyBadgeToJobs(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const toBadgeUuid = url.searchParams.get("toBadge");
+  if (!tenantId || !toBadgeUuid) return json({ error: "?tenant= and ?toBadge= required" }, { status: 400 });
+  const { jobUuids } = await readJson(request);
+  if (!Array.isArray(jobUuids) || !jobUuids.length) return json({ error: "jobUuids array required in body" }, { status: 400 });
+
+  let updated = 0;
+  let alreadyHad = 0;
+  const errors = [];
+  for (const jobUuid of jobUuids) {
+    try {
+      const job = await getJob(env, tenantId, jobUuid);
+      const current = parseBadges(job.badges);
+      if (current.includes(toBadgeUuid)) {
+        alreadyHad++;
+      } else {
+        await updateJobBadges(env, tenantId, jobUuid, [...current, toBadgeUuid]);
+        updated++;
+      }
+    } catch (err) {
+      errors.push({ jobUuid, error: String(err && err.message) });
+    }
+    await sleep(350);
+  }
+  return json({ total: jobUuids.length, updated, alreadyHad, errors });
 }
 
 async function handleDebugApplyBadgeToMatching(request, env) {
@@ -796,6 +843,7 @@ export default {
     if (pathname === "/addon/queue" && method === "OPTIONS") return handleAddonPreflight();
     if (pathname === "/dashboard" && method === "GET") return handleDashboard(request, env);
     if (pathname === "/dashboard/approve" && method === "POST") return handleDashboardApprove(request, env);
+    if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
 
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
@@ -810,6 +858,7 @@ export default {
     if (pathname === "/debug/create-test-badge" && method === "POST") return handleDebugCreateTestBadge(request, env);
     if (pathname === "/debug/delete-badge" && method === "POST") return handleDebugDeleteBadgeByUuid(request, env);
     if (pathname === "/debug/apply-badge-to-matching" && method === "POST") return handleDebugApplyBadgeToMatching(request, env);
+    if (pathname === "/debug/apply-badge-to-jobs" && method === "POST") return handleDebugApplyBadgeToJobs(request, env);
     if (pathname === "/debug/update-badge-icons" && method === "POST") return handleDebugUpdateBadgeIcons(request, env);
     if (pathname === "/debug/delete-renewal-badges" && method === "POST") return handleDebugDeleteRenewalBadges(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);

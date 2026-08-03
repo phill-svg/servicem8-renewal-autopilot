@@ -18,7 +18,7 @@ function telHref(p) {
 
 export async function renderDashboardHtml(env, tenantId, token) {
   const { results: dueCustomers } = await env.DB.prepare(
-    `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL ORDER BY bucket, last_completed_at`
+    `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL ORDER BY bucket, last_completed_at`
   )
     .bind(tenantId)
     .all();
@@ -56,25 +56,48 @@ export async function renderDashboardHtml(env, tenantId, token) {
     .map((r) => {
       const s = STYLE[r.bucket] || STYLE.due_soon;
       const drafts = draftsByCustomer[r.id] || [];
-      const draftHtml = drafts.length
-        ? drafts
-            .map((d) => {
-              if (d.status === "sent") {
-                return `<div style="margin-top:6px;font-size:12px;color:#2e7d32;">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</div>`;
-              }
-              if (d.status === "pending") {
-                return `<div style="margin-top:8px;padding:8px;background:#fff;border:1px solid #e6e6ea;border-radius:4px;">
-                  <div style="font-size:12px;color:#666;margin-bottom:4px;">${escapeHtml(d.channel.toUpperCase())} draft -- edit before sending if needed</div>
-                  <textarea data-draft-text="${escapeHtml(d.id)}" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;min-height:4.5em;margin-bottom:6px;">${escapeHtml(d.draft_body)}</textarea>
-                  <button data-draft="${escapeHtml(d.id)}" class="approve-btn" style="background:#2b2b30;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Approve &amp; Send</button>
-                </div>`;
-              }
-              return "";
-            })
-            .join("")
-        : `<div style="margin-top:6px;font-size:12px;color:#999;">No draft yet</div>`;
+      const smsDraft = drafts.find((d) => d.channel === "sms");
+      const emailDraft = drafts.find((d) => d.channel === "email");
+      const pendingChannels = [
+        smsDraft && smsDraft.status === "pending" ? "sms" : null,
+        emailDraft && emailDraft.status === "pending" ? "email" : null,
+      ].filter(Boolean);
+      const sentChannels = [smsDraft, emailDraft].filter((d) => d && d.status === "sent");
 
-      return `<tr data-service="${escapeHtml(r.service_name)}" style="background:${s.bg};border-left:4px solid ${s.border}">
+      let draftHtml;
+      if (!drafts.length) {
+        draftHtml = `<div style="margin-top:6px;font-size:12px;color:#999;">No draft yet</div>`;
+      } else if (!pendingChannels.length) {
+        // Both channels already actioned -- just show what was sent.
+        draftHtml = sentChannels.length
+          ? sentChannels.map((d) => `<div style="margin-top:6px;font-size:12px;color:#2e7d32;">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</div>`).join("")
+          : `<div style="margin-top:6px;font-size:12px;color:#999;">No pending draft</div>`;
+      } else {
+        // One dropdown to pick the channel, one textarea/button that follows
+        // whichever channel is currently selected -- not two separate boxes.
+        const byChannel = { sms: smsDraft, email: emailDraft };
+        const options = pendingChannels
+          .map((ch) => `<option value="${ch}">${ch.toUpperCase()}</option>`)
+          .join("");
+        const sentNote = sentChannels.length
+          ? sentChannels.map((d) => `<div style="font-size:11px;color:#2e7d32;margin-top:4px;">&#10003; ${escapeHtml(d.channel.toUpperCase())} already sent</div>`).join("")
+          : "";
+        const bodyAttrs = pendingChannels
+          .map((ch) => `data-body-${ch}="${escapeHtml(byChannel[ch].draft_body)}" data-draft-${ch}="${escapeHtml(byChannel[ch].id)}"`)
+          .join(" ");
+
+        draftHtml = `<div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs} style="margin-top:8px;padding:8px;background:#fff;border:1px solid #e6e6ea;border-radius:4px;">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <select class="channel-select" style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid #ccc;">${options}</select>
+            <span style="font-size:12px;color:#666;">draft -- edit before sending if needed</span>
+          </div>
+          <textarea class="draft-textarea" style="width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;min-height:4.5em;margin-bottom:6px;">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
+          <button class="approve-btn" style="background:#2b2b30;color:#fff;border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Approve &amp; Send</button>
+          ${sentNote}
+        </div>`;
+      }
+
+      return `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" style="background:${s.bg};border-left:4px solid ${s.border}">
         <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
         <td style="padding:10px;vertical-align:top;">
           <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -84,6 +107,9 @@ export async function renderDashboardHtml(env, tenantId, token) {
         </td>
         <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.service_name || "Unknown")}</td>
         <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.last_completed_at || "")}</td>
+        <td style="padding:10px;vertical-align:top;text-align:center;">
+          <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
+        </td>
       </tr>`;
     })
     .join("\n");
@@ -122,8 +148,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   </select>
 </div>
 <table>
-<thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th></tr></thead>
-<tbody>${rows || '<tr><td colspan="4" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
+<thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
+<tbody>${rows || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#999;">Nothing due yet -- configure category tracking to get started.</td></tr>'}</tbody>
 </table>
 <div id="empty-filtered">No customers due for this service.</div>
 <script>
@@ -141,24 +167,74 @@ export async function renderDashboardHtml(env, tenantId, token) {
     document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
   });
 
-  document.querySelectorAll('.approve-btn').forEach(function (btn) {
+  document.querySelectorAll('.draft-card').forEach(function (card) {
+    var select = card.querySelector('.channel-select');
+    var textarea = card.querySelector('.draft-textarea');
+    var editedByChannel = {};
+
+    function loadChannel(ch) {
+      textarea.value = editedByChannel[ch] !== undefined ? editedByChannel[ch] : (card.dataset['body' + ch.charAt(0).toUpperCase() + ch.slice(1)] || '');
+    }
+    select.addEventListener('change', function () {
+      loadChannel(select.value);
+    });
+    textarea.addEventListener('input', function () {
+      editedByChannel[select.value] = textarea.value;
+    });
+
+    var btn = card.querySelector('.approve-btn');
     btn.addEventListener('click', async function () {
-      var draftId = btn.dataset.draft;
-      var textarea = document.querySelector('textarea[data-draft-text="' + draftId + '"]');
+      var ch = select.value;
+      var draftId = card.dataset['draft' + ch.charAt(0).toUpperCase() + ch.slice(1)];
       btn.disabled = true;
+      select.disabled = true;
       btn.textContent = 'Sending...';
       try {
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea ? textarea.value : undefined }),
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value }),
         });
-        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
-      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
+        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; select.disabled = false; }
+      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; select.disabled = false; }
+    });
+  });
+
+  document.querySelectorAll('.dismiss-btn').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      var rowId = btn.dataset.dismiss;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/dashboard/dismiss', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, dueCustomerId: rowId }),
+        });
+        if (res.ok) {
+          var row = document.querySelector('tr[data-row-id="' + rowId + '"]');
+          if (row) row.remove();
+          allRows = allRows.filter(function (r) { return r.dataset.rowId !== rowId; });
+          var visible = allRows.filter(function (r) { return r.style.display !== 'none'; }).length;
+          document.getElementById('sub-count').textContent = visible + ' customer(s) due for renewal';
+        } else {
+          btn.disabled = false;
+        }
+      } catch (e) { btn.disabled = false; }
     });
   });
 </script>
 </body></html>`;
+}
+
+// Hides a due_customers row from the dashboard for the current cycle -- not
+// a permanent delete. The engine's upsert (src/due-engine.js) clears
+// dismissed_at automatically once last_completed_at moves forward (a new
+// job happened, meaning a fresh cycle), so a dismissed customer reappears
+// naturally next time they're actually due again, rather than being lost.
+export async function dismissDueCustomer(env, tenantId, dueCustomerId) {
+  await env.DB.prepare("UPDATE due_customers SET dismissed_at = ? WHERE id = ? AND tenant_id = ?")
+    .bind(Date.now(), dueCustomerId, tenantId)
+    .run();
 }
 
 // editedBody: staff can revise the draft text in the dashboard textarea
@@ -183,7 +259,7 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     } else {
       await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
-        subject: draft.draft_subject || "You're due for your next service",
+        subject: draft.draft_subject || "Time for your next pest treatment",
         textBody: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });

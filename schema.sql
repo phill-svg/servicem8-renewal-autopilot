@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS due_customers (
   last_completed_at        TEXT,
   bucket                   TEXT NOT NULL, -- due_soon | due | overdue
   suppressed_reason        TEXT,          -- NULL | open_pipeline_job | category_untracked
+  dismissed_at             INTEGER,       -- staff clicked the X in the dashboard for this cycle;
+                                          -- cleared automatically once last_completed_at moves
+                                          -- forward (a new service happened -- fresh cycle)
   contact_name_cache       TEXT,
   contact_email_cache      TEXT,
   contact_phone_cache      TEXT,
