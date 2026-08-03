@@ -134,7 +134,8 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   default_channel        TEXT NOT NULL DEFAULT 'sms',
   sms_template           TEXT,
   email_subject_template TEXT,
-  email_body_template    TEXT
+  email_body_template    TEXT,
+  business_name          TEXT   -- the installing account's own business name (from /vendor.json), appended as a sign-off to reminder messages
 );
 
 -- Our own registry of what webhook subscriptions we believe are active per

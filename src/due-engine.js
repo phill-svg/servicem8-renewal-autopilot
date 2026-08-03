@@ -359,14 +359,25 @@ async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
 
   if (dueCustomer.contact_phone_cache) {
-    const body = (settings?.sms_template || DEFAULT_SMS).replace("{{name}}", firstName);
+    const body = signOff((settings?.sms_template || DEFAULT_SMS).replace("{{name}}", firstName), settings);
     await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body);
   }
   if (dueCustomer.contact_email_cache) {
     const subject = settings?.email_subject_template || "Time for your next pest treatment";
-    const body = (settings?.email_body_template || DEFAULT_EMAIL_BODY).replace("{{name}}", firstName);
+    const body = signOff((settings?.email_body_template || DEFAULT_EMAIL_BODY).replace("{{name}}", firstName), settings);
     await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, subject, body);
   }
+}
+
+// Appends the installing business's own name as a sign-off, so every reminder
+// is clearly from them (captured from /vendor.json on install -- see
+// tenant_settings.business_name). No-op if the name isn't known yet or is
+// already present at the end of the body.
+function signOff(body, settings) {
+  const name = (settings?.business_name || "").trim();
+  if (!name) return body;
+  if (body.trimEnd().endsWith(name)) return body;
+  return `${body}\n\n- ${name}`;
 }
 
 // Auto-generated follow-up rounds, confirmed with the user 2026-08-04: round
@@ -405,12 +416,13 @@ async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMont
 
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
   const tmpl = FOLLOWUP_TEMPLATES[round];
+  const settings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
 
   if (dueCustomer.contact_phone_cache) {
-    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "sms", round, null, tmpl.sms.replace("{{name}}", firstName));
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "sms", round, null, signOff(tmpl.sms.replace("{{name}}", firstName), settings));
   }
   if (dueCustomer.contact_email_cache) {
-    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "email", round, tmpl.emailSubject, tmpl.email.replace("{{name}}", firstName));
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "email", round, tmpl.emailSubject, signOff(tmpl.email.replace("{{name}}", firstName), settings));
   }
 }
 

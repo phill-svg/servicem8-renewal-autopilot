@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -115,6 +115,17 @@ async function handleOAuthCallback(request, env, ctx) {
   );
   if (ctx && ctx.waitUntil) ctx.waitUntil(provisionBadges);
   else await provisionBadges;
+
+  // Capture the installing account's own business name (vendor scope) so
+  // reminder messages can be signed off with it. Non-fatal -- if the scope
+  // isn't granted or the call fails, the sign-off is simply omitted.
+  const captureBusinessName = getVendorName(env, tenantId)
+    .then((name) => {
+      if (name) return env.DB.prepare("UPDATE tenant_settings SET business_name = ? WHERE tenant_id = ?").bind(name, tenantId).run();
+    })
+    .catch((err) => console.error(`install: business-name capture failed for tenant ${tenantId}`, err));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(captureBusinessName);
+  else await captureBusinessName;
 
   return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
 }

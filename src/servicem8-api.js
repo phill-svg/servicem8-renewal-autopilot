@@ -276,6 +276,21 @@ export async function listNotesForJob(env, tenantId, jobUuid) {
   return sm8Fetch(env, tenantId, `/note.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
 }
 
+// The installing account's OWN business name, from its Vendor record
+// (/vendor.json, "vendor" scope). Used as the sign-off appended to reminder
+// message bodies so each tenant's messages are signed with their own
+// business. Returns "" if the scope isn't granted yet or the call fails.
+export async function getVendorName(env, tenantId) {
+  try {
+    const vendors = await sm8Fetch(env, tenantId, `/vendor.json`);
+    const v = Array.isArray(vendors) ? vendors[0] : vendors;
+    return (v?.name || "").trim();
+  } catch (err) {
+    console.error(`getVendorName failed for tenant ${tenantId}:`, err);
+    return "";
+  }
+}
+
 // Job Categories configured on the tenant's account, for the setup wizard's
 // category picker (Phase 2) -- NEEDS LIVE CONFIRMATION of the resource name;
 // assumed `category.json` by ServiceM8's general naming convention
