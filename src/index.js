@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges, createCompanyContact } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge, listAllJobsAnyStatus, updateJobBadges, parseBadges, createCompanyContact, sendPlatformSms } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -649,6 +649,24 @@ async function handleDebugDeleteBadgeByUuid(request, env) {
   }
 }
 
+async function handleDebugTestSms(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const to = url.searchParams.get("to");
+  const jobUuid = url.searchParams.get("jobUuid");
+  if (!tenantId || !to) return json({ error: "?tenant= and ?to= required" }, { status: 400 });
+  try {
+    const result = await sendPlatformSms(env, tenantId, {
+      to,
+      message: "Test message from Renewal Autopilot -- ignore, verifying send mechanics.",
+      regardingJobUuid: jobUuid || undefined,
+    });
+    return json({ ok: true, result });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugCreateContact(request, env) {
   const url = new URL(request.url);
   const tenantId = url.searchParams.get("tenant");
@@ -874,6 +892,7 @@ export default {
     if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
     if (pathname === "/debug/create-test-badge" && method === "POST") return handleDebugCreateTestBadge(request, env);
     if (pathname === "/debug/create-contact" && method === "POST") return handleDebugCreateContact(request, env);
+    if (pathname === "/debug/test-sms" && method === "POST") return handleDebugTestSms(request, env);
     if (pathname === "/debug/delete-badge" && method === "POST") return handleDebugDeleteBadgeByUuid(request, env);
     if (pathname === "/debug/apply-badge-to-matching" && method === "POST") return handleDebugApplyBadgeToMatching(request, env);
     if (pathname === "/debug/apply-badge-to-jobs" && method === "POST") return handleDebugApplyBadgeToJobs(request, env);

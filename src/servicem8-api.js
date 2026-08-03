@@ -13,6 +13,12 @@
 import { getValidAccessToken } from "./servicem8-oauth.js";
 
 const API_BASE = "https://api.servicem8.com/api_1.0";
+// The Messaging API (platform_service_sms/email) lives at the API root, NOT
+// under /api_1.0 like every other resource -- confirmed live (2026-08-03) via
+// a "not an authorised object type" 400, the same misleading symptom the
+// webhook_subscriptions path issue gave earlier this session. Docs confirm:
+// https://api.servicem8.com/platform_service_sms, no /api_1.0 prefix.
+const PLATFORM_BASE = "https://api.servicem8.com";
 
 async function sm8Fetch(env, tenantId, path) {
   const token = await getValidAccessToken(env, tenantId);
@@ -49,6 +55,29 @@ async function sm8PostJson(env, tenantId, path, body) {
     throw new Error(`ServiceM8 API POST ${path} failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
   }
   return res.json();
+}
+
+async function platformPostJson(env, tenantId, path, body) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${PLATFORM_BASE}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API POST ${path} failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
+  }
+  return res.json();
+}
+
+// ServiceM8's Messaging API requires E.164 ("+61412345678"), not local
+// Australian format ("0412 345 678" / "0412345678") -- confirmed in the docs
+// alongside the endpoint-path fix above.
+function toE164Au(phone) {
+  const digits = (phone || "").replace(/[^0-9+]/g, "");
+  if (digits.startsWith("+")) return digits;
+  if (digits.startsWith("0")) return "+61" + digits.slice(1);
+  return digits;
 }
 
 // ServiceM8's filter language only supports eq/ne/gt/lt -- no substring, no
@@ -272,15 +301,15 @@ export async function registerWebhook(env, tenantId, { event, callbackUrl }) {
 // credits/sender ID), no separate SMS provider needed.
 
 export async function sendPlatformSms(env, tenantId, { to, message, regardingJobUuid }) {
-  return sm8PostJson(env, tenantId, `/platform_service_sms`, {
-    to,
+  return platformPostJson(env, tenantId, `/platform_service_sms`, {
+    to: toE164Au(to),
     message,
     ...(regardingJobUuid ? { regardingJobUUID: regardingJobUuid } : {}),
   });
 }
 
 export async function sendPlatformEmail(env, tenantId, { to, subject, htmlBody, textBody, regardingJobUuid }) {
-  return sm8PostJson(env, tenantId, `/platform_service_email`, {
+  return platformPostJson(env, tenantId, `/platform_service_email`, {
     to,
     subject,
     ...(htmlBody ? { htmlBody } : {}),
