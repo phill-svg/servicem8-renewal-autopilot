@@ -17,7 +17,16 @@ import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsFo
 // they already have (avoids disturbing an existing workflow) -- see
 // 2026-08-03 decision. Only the 1-year one gets auto-wired into a tracking
 // rule for now; 3/6-month are created for future use but left unconfigured.
-const RENEWAL_BADGE_NAMES = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
+// Plain color + text, no icon glyph -- matches the "CHASE PAYMENT" style
+// badge Phill made natively in ServiceM8 (their own "no icon" picker option),
+// each with its cadence baked into the image as text since ServiceM8 doesn't
+// overlay the badge name as text on custom-image badges the way it does for
+// its own icon-picker badges.
+const RENEWAL_BADGES = [
+  { name: "Renewal Autopilot - 3 Month", file: "badge-3month.png" },
+  { name: "Renewal Autopilot - 6 Month", file: "badge-6month.png" },
+  { name: "Renewal Autopilot - 1 Year", file: "badge-1year.png" },
+];
 const AUTO_TRACKED_BADGE_NAME = "Renewal Autopilot - 1 Year";
 const AUTO_TRACKED_INTERVAL_MONTHS = 12;
 
@@ -33,16 +42,15 @@ export async function ensureRenewalBadgesAndDefaultRule(env, tenantId, origin) {
     console.error(`ensureRenewalBadges: failed to list existing badges for tenant ${tenantId}`, err);
   }
   const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
-  const fileUrl = `${origin}/assets/images/badge-green-sprite-v2.png`;
 
   const uuidByName = {};
-  for (const name of RENEWAL_BADGE_NAMES) {
+  for (const { name, file } of RENEWAL_BADGES) {
     if (existingByName.has(name)) {
       uuidByName[name] = existingByName.get(name);
       continue;
     }
     try {
-      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl });
+      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl: `${origin}/assets/images/${file}` });
     } catch (err) {
       console.error(`ensureRenewalBadges: failed to create badge "${name}" for tenant ${tenantId}`, err);
     }
