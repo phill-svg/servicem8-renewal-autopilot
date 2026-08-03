@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -440,6 +440,74 @@ async function handleDebugRecompute(request, env) {
   }
 }
 
+// One-time cleanup: TCB's historical "Standard" category was a mixed bag of
+// general pest visits (the true recurring yearly service) and one-off
+// specialist jobs (fleas, bed bugs, rats, possums, termites) that were never
+// properly recategorized. Reclassifying each by hand (per Phill's review of
+// every job's description) so the due-detection engine tracking "Premium
+// Pest Treatment" reflects only genuine recurring general-pest visits.
+// Jobs with no good existing category (flea, subfloor timber, TPI, ants) are
+// deliberately left untouched -- they stay in "Standard", which is no longer
+// a tracked category, so they're correctly excluded either way.
+const PREMIUM_PEST_UUID = "97af1d3c-07ac-4aae-8862-23184055ce5b";
+const RODENT_UUID = "65374f33-5111-4411-976d-232fc24a43ab";
+const BED_BUG_UUID = "a1abb6a4-1c94-4f65-9150-2354da1a8c8b";
+const WILDLIFE_UUID = "82142727-ec9f-49e2-bd3b-231849b852eb";
+const TERMITE_MGMT_UUID = "4b0df417-bd76-44a5-b9b9-231843331c3b";
+
+const STANDARD_RECLASSIFY_MAP = {
+  "fbcc98bb-215e-4327-b30f-23052003292d": PREMIUM_PEST_UUID, // 117 Clift Crescent -- general pest service
+  "b55bfc35-2eaf-45ee-982a-23076a976c9d": PREMIUM_PEST_UUID, // 1/18 Breen Pl -- General Pest
+  "da525b59-56fe-49cb-be26-232a2727444d": PREMIUM_PEST_UUID, // 1041 Harolds Cross Rd -- General pest treatment
+  "b038f108-945d-4517-8508-235537fc0b0d": PREMIUM_PEST_UUID, // 4 Dalziel Street -- Gp-ants
+  "278a2bcf-5b5f-44c0-832b-23529bed4c5b": PREMIUM_PEST_UUID, // 1617 Burra Rd -- General Pest
+  "e1313900-2450-4052-8b7c-2344f5b9dded": PREMIUM_PEST_UUID, // 15 Boronia Crescent -- GP
+  "8110911b-8a9c-43fd-b5d2-23aa3279874b": PREMIUM_PEST_UUID, // 55 Alberga St -- Full general pest
+  "b04c1bbb-33c8-4c03-a83c-230769f4af1b": PREMIUM_PEST_UUID, // food court hyperdome -- Rodents, General Pest
+  "f4f0ec36-1f5d-48eb-b4f9-230efd22bf9d": PREMIUM_PEST_UUID, // 8 Hayward Street -- lots of spiders
+  "831f13c3-2f85-419f-9ac5-2303d49fa2cb": RODENT_UUID, // 27A Massey St -- Investigate rat infestation
+  "79fcb3c9-26dd-449d-95bd-2354d445838b": RODENT_UUID, // 80 Dumas St -- rodent in the roof
+  "2408460b-043d-4153-830a-2306fc9b942b": BED_BUG_UUID, // 120 Auburn Street Goulburn -- Bed bug inspection/treatment
+  "17b32e9c-6e88-4528-b014-23176ed79dfb": WILDLIFE_UUID, // 9 O'Rourke Pl -- Possum fell down chimney
+  "89a1a774-ce09-4a2e-92aa-23076f7ed4dd": TERMITE_MGMT_UUID, // 29 Redbox Place -- Termite inspection and Termidore recharge
+};
+
+async function handleDebugReclassifyStandard(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const results = [];
+  for (const [jobUuid, categoryUuid] of Object.entries(STANDARD_RECLASSIFY_MAP)) {
+    try {
+      await updateJobCategory(env, tenantId, jobUuid, categoryUuid);
+      results.push({ jobUuid, categoryUuid, ok: true });
+    } catch (err) {
+      results.push({ jobUuid, categoryUuid, ok: false, error: String(err && err.message) });
+    }
+  }
+  return json({ results });
+}
+
+async function handleDebugSampleJobs(request, env) {
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const categoryUuid = url.searchParams.get("category");
+  if (!tenantId || !categoryUuid) return json({ error: "?tenant= and ?category= required" }, { status: 400 });
+  try {
+    const jobs = await listCompletedJobsForCategory(env, tenantId, categoryUuid);
+    const limit = Number(url.searchParams.get("limit")) || 8;
+    const sample = (jobs || []).slice(0, limit).map((j) => ({
+      uuid: j.uuid,
+      job_address: j.job_address,
+      job_description: j.job_description,
+      completion_date: j.completion_date,
+      company_uuid: j.company_uuid,
+    }));
+    return json({ total: (jobs || []).length, sample });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugCategoryBreakdown(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
@@ -524,6 +592,8 @@ export default {
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
     if (pathname === "/debug/contact" && method === "GET") return handleDebugContact(request, env);
     if (pathname === "/debug/category-breakdown" && method === "GET") return handleDebugCategoryBreakdown(request, env);
+    if (pathname === "/debug/sample-jobs" && method === "GET") return handleDebugSampleJobs(request, env);
+    if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {

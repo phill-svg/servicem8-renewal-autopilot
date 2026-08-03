@@ -62,6 +62,14 @@ export async function getJob(env, tenantId, jobUuid) {
   return sm8Fetch(env, tenantId, `/job/${jobUuid}.json`);
 }
 
+// Updates fields on an existing job -- ServiceM8's REST convention is POST to
+// the record's own .json URL with only the changed fields (same shape as
+// creating, per their docs). Used for one-off historical-data cleanup (see
+// /debug/reclassify-jobs), not part of the live due-detection path.
+export async function updateJobCategory(env, tenantId, jobUuid, categoryUuid) {
+  return sm8PostJson(env, tenantId, `/job/${jobUuid}.json`, { category_uuid: categoryUuid });
+}
+
 // Completed jobs for a category, optionally only those completed *before* a
 // cursor date -- this is the chunking mechanism for backfill (see
 // src/due-engine.js): each chunk asks for the next slice moving backward in
