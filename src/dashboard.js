@@ -11,6 +11,7 @@ const STYLE = {
   due: { bg: "#ffe9d6", border: "#c2660a", label: "Due now", text: "#7a3d05" },
   due_soon: { bg: "#fff6d6", border: "#a68b00", label: "Due soon", text: "#6b5900" },
   due_later: { bg: "#e8f0fe", border: "#3a6bc4", label: "Due later", text: "#254d8f" },
+  contacted: { bg: "#e6f4ea", border: "#2e7d32", label: "Contacted", text: "#1b5e20" },
 };
 
 function telHref(p) {
@@ -58,12 +59,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
     for (const d of drafts || []) (draftsByCustomer[d.due_customer_id] ||= []).push(d);
   }
 
-  const counts = { overdue: 0, due: 0, due_soon: 0, due_later: 0 };
-  (dueCustomers || []).forEach((r) => (counts[r.bucket] = (counts[r.bucket] || 0) + 1));
-
   const allRowsData = (dueCustomers || [])
     .map((r) => {
-      const s = STYLE[r.bucket] || STYLE.due_soon;
       const drafts = draftsByCustomer[r.id] || [];
       const smsDraft = drafts.find((d) => d.channel === "sms");
       const emailDraft = drafts.find((d) => d.channel === "email");
@@ -106,19 +103,22 @@ export async function renderDashboardHtml(env, tenantId, token) {
         </div>`;
       }
 
-      // Fully handled (had drafts, none left pending) moves to one of the
-      // "Contacted N" sections below instead of cluttering the main
-      // actionable list -- staff shouldn't have to re-check something with
-      // nothing left to do. Which section is driven by reminder_round (how
-      // many rounds have actually been sent so far), not just draft count,
-      // so a customer waiting on their auto-generated round-2 follow-up
-      // shows as "Contacted 1", not lumped in with someone on their last
-      // round -- see src/due-engine.js's generateFollowUpDraftsForTenant.
+      // A customer with drafts but none left pending has been fully actioned
+      // for their current round -- they move OUT of their urgency bucket
+      // (Overdue/Due now/etc) into a "Contacted N" tab, where N = how many
+      // rounds have actually been sent (reminder_round - 1). When the nightly
+      // cron later auto-generates their next round's drafts (see
+      // src/due-engine.js's generateFollowUpDraftsForTenant), those drafts are
+      // pending again, so they automatically move BACK into their urgency
+      // bucket to be actioned -- then to Contacted N+1 once sent, and so on.
       const alreadyContacted = drafts.length > 0 && !pendingChannels.length;
       const contactedRound = Math.min(Math.max((r.reminder_round || 1) - 1, 1), 3);
+      const tabBucket = alreadyContacted ? `contacted${contactedRound}` : r.bucket;
+      const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
+      const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
-      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(r.bucket)}" style="background:${s.bg};border-left:4px solid ${s.border}">
-        <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
+      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" style="background:${s.bg};border-left:4px solid ${s.border}">
+        <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(statusLabel)}</td>
         <td style="padding:10px;vertical-align:top;">
           <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
           <div style="font-size:12px;color:#666;">${escapeHtml(r.address_display || "")}</div>
@@ -141,34 +141,21 @@ export async function renderDashboardHtml(env, tenantId, token) {
           <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
         </td>
       </tr>`;
-      return { html, alreadyContacted, contactedRound };
+      return { html, tabBucket };
     });
 
-  const rows = allRowsData.filter((r) => !r.alreadyContacted).map((r) => r.html).join("\n");
-  const contactedByRound = { 1: [], 2: [], 3: [] };
-  allRowsData.filter((r) => r.alreadyContacted).forEach((r) => contactedByRound[r.contactedRound].push(r.html));
-  const CONTACTED_LABELS = {
-    1: "waiting on follow-up reminder",
-    2: "waiting on final reminder",
-    3: "final reminder sent",
-  };
-  const contactedSectionsHtml = [1, 2, 3]
-    .map((n) => {
-      const list = contactedByRound[n];
-      if (!list.length) return "";
-      return `<details style="margin-top:16px;">
-  <summary style="cursor:pointer;font-size:13px;color:#666;padding:8px 0;">Contacted ${n} (${list.length}) -- ${CONTACTED_LABELS[n]}</summary>
-  <table style="margin-top:8px;">
-  <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th></th></tr></thead>
-  <tbody>${list.join("\n")}</tbody>
-  </table>
-</details>`;
-    })
-    .join("\n");
+  // Counts per tab, derived from each row's assigned tabBucket -- one source
+  // of truth so the tab labels and the actual filtered rows can never drift.
+  const counts = { overdue: 0, due: 0, due_soon: 0, due_later: 0, contacted1: 0, contacted2: 0, contacted3: 0 };
+  allRowsData.forEach((r) => (counts[r.tabBucket] = (counts[r.tabBucket] || 0) + 1));
+
+  const rows = allRowsData.map((r) => r.html).join("\n");
 
   // Default-active tab: the first non-empty bucket in urgency order, falling
   // back to Overdue if everything's empty (e.g. a fresh install).
-  const defaultBucket = ["overdue", "due", "due_soon", "due_later"].find((b) => counts[b] > 0) || "overdue";
+  const TAB_ORDER = ["overdue", "due", "due_soon", "due_later", "contacted1", "contacted2", "contacted3"];
+  const defaultBucket = TAB_ORDER.find((b) => counts[b] > 0) || "overdue";
+  const actionableCount = counts.overdue + counts.due + counts.due_soon + counts.due_later;
 
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
@@ -191,12 +178,15 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </head>
 <body>
 <h1>Renewal Autopilot</h1>
-<div class="sub" id="sub-count">${allRowsData.filter((r) => !r.alreadyContacted).length} customer(s) due for renewal</div>
+<div class="sub" id="sub-count">${actionableCount} customer(s) due for renewal</div>
 <div class="tabs">
   <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
   <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
   <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
   <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later (${counts.due_later})</button>
+  <button class="tab-btn${defaultBucket === "contacted1" ? " active" : ""}" data-tab-bucket="contacted1" style="margin-left:12px;">Contacted 1 (${counts.contacted1})</button>
+  <button class="tab-btn${defaultBucket === "contacted2" ? " active" : ""}" data-tab-bucket="contacted2">Contacted 2 (${counts.contacted2})</button>
+  <button class="tab-btn${defaultBucket === "contacted3" ? " active" : ""}" data-tab-bucket="contacted3">Contacted 3 (${counts.contacted3})</button>
 </div>
 <div class="toolbar">
   <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
@@ -211,7 +201,6 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </table>
 <div id="empty-filtered">No customers due for this service.</div>
 
-${contactedSectionsHtml}
 <script>
   var filterSelect = document.getElementById('service-filter');
   var allRows = Array.prototype.slice.call(document.querySelectorAll('#due-table tbody tr[data-service]'));
@@ -227,7 +216,8 @@ ${contactedSectionsHtml}
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
-    document.getElementById('sub-count').textContent = visibleCount + ' customer(s) due for renewal' + (serviceValue ? ' -- ' + serviceValue : '');
+    var noun = activeBucket.indexOf('contacted') === 0 ? ' customer(s) already contacted' : ' customer(s) due for renewal';
+    document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' -- ' + serviceValue : '');
     document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
   }
 
