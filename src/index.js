@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge, deleteBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -550,12 +550,18 @@ async function handleDebugUpdateBadgeIcons(request, env) {
   const tenantId = new URL(request.url).searchParams.get("tenant");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   const origin = new URL(request.url).origin;
-  const fileUrl = `${origin}/assets/images/badge-green-sprite-v2.png`;
-  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
+  // Per-badge labeled sprite -- plain color + text, no icon glyph, matching
+  // the "CHASE PAYMENT" style Phill pointed to (a solid color circle with
+  // just text, made via ServiceM8's own "no icon" picker option).
+  const fileByName = {
+    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month.png`,
+    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month.png`,
+    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year.png`,
+  };
   try {
     const badges = (await listBadges(env, tenantId)) || [];
     const results = [];
-    for (const name of names) {
+    for (const [name, fileUrl] of Object.entries(fileByName)) {
       const badge = badges.find((b) => b.name === name);
       if (!badge) {
         results.push({ name, ok: false, error: "badge not found" });
@@ -563,6 +569,33 @@ async function handleDebugUpdateBadgeIcons(request, env) {
       }
       try {
         await updateBadge(env, tenantId, badge.uuid, { fileUrl });
+        results.push({ name, uuid: badge.uuid, fileUrl, ok: true });
+      } catch (err) {
+        results.push({ name, uuid: badge.uuid, ok: false, error: String(err && err.message) });
+      }
+    }
+    return json({ results });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
+// Retires the badly-styled first-attempt custom-image badges -- ServiceM8's
+// icon+color picker is UI-only (see 2026-08-03 research), so the file_name
+// custom-image approach was the wrong path entirely; the tenant creates
+// badges natively instead and tells the app their name.
+async function handleDebugDeleteRenewalBadges(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
+  try {
+    const badges = (await listBadges(env, tenantId)) || [];
+    const results = [];
+    for (const name of names) {
+      const badge = badges.find((b) => b.name === name);
+      if (!badge) continue;
+      try {
+        await deleteBadge(env, tenantId, badge.uuid);
         results.push({ name, uuid: badge.uuid, ok: true });
       } catch (err) {
         results.push({ name, uuid: badge.uuid, ok: false, error: String(err && err.message) });
@@ -697,6 +730,7 @@ export default {
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
     if (pathname === "/debug/update-badge-icons" && method === "POST") return handleDebugUpdateBadgeIcons(request, env);
+    if (pathname === "/debug/delete-renewal-badges" && method === "POST") return handleDebugDeleteRenewalBadges(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {

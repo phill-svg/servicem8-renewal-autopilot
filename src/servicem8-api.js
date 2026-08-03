@@ -72,6 +72,19 @@ export async function listBadges(env, tenantId) {
   return sm8Fetch(env, tenantId, `/badge.json`);
 }
 
+// ServiceM8 "delete" just sets active=0 (hidden from UI, still API-visible) --
+// used to retire the badly-styled first-attempt custom-image badges.
+export async function deleteBadge(env, tenantId, badgeUuid) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${API_BASE}/badge/${badgeUuid}.json`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API DELETE /badge/${badgeUuid}.json failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
+  }
+}
+
 // Updates an existing badge -- used to force ServiceM8 to re-fetch a changed
 // sprite image at the same file_name URL (it appears to cache/copy the image
 // at creation time rather than proxying it live).
