@@ -7,6 +7,10 @@
   "workers_dev": true,
   // TODO: add a custom_domain route once this product has its own domain, e.g.:
   // "routes": [{ "pattern": "renewalautopilot.example.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
   "d1_databases": [
     {
       "binding": "DB",

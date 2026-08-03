@@ -13,7 +13,7 @@
       "name": "Renewal Autopilot",
       "type": "online",
       "entity": "job",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/favicon.ico",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
       "event": "open_queue",
       "location": "modal",
       "url": "https://renewal-autopilot.phill-abb.workers.dev/addon/queue"
