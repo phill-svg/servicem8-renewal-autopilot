@@ -347,6 +347,15 @@ async function resolveTenantFromAccountUuid(env, accountUuid) {
           .bind(freshTokens.access_token, freshTokens.refresh_token, freshTokens.access_token_expires_at, freshTokens.scope, freshTokens.updated_at, byResolved.servicem8_account_uuid)
           .run();
       }
+      // A reinstall captures fresh tenant_settings (e.g. business_name from
+      // /vendor.json) on the provisional row -- carry those onto the resolved
+      // tenant so they aren't stranded when the provisional row is retired.
+      const freshSettings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(freshest.servicem8_account_uuid).first();
+      if (freshSettings?.business_name) {
+        await env.DB.prepare("UPDATE tenant_settings SET business_name = ? WHERE tenant_id = ?")
+          .bind(freshSettings.business_name, byResolved.servicem8_account_uuid)
+          .run();
+      }
       for (const stale of candidates) {
         await env.DB.prepare("UPDATE tenants SET status = 'uninstalled', uninstalled_at = ? WHERE servicem8_account_uuid = ?")
           .bind(Date.now(), stale.servicem8_account_uuid)
