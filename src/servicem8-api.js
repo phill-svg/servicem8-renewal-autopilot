@@ -254,11 +254,10 @@ export async function listOpenJobsForCompany(env, tenantId, companyUuid) {
 // restatement of the service type ("Premium pest treatment"), sometimes
 // blank, and duplicates what the category already shows.
 //
-// NEEDS LIVE CONFIRMATION once read_job_notes is granted: filter field
-// assumed related_object_uuid/related_object, matching dboattachment's
-// polymorphic-attachment convention seen elsewhere in this account's data --
-// could instead be a direct job_uuid column. Check the real shape via
-// /debug/raw before trusting this in production.
+// Confirmed live (2026-08-04): related_object_uuid/related_object, same
+// polymorphic-attachment convention as dboattachment. Fields are uuid,
+// create_date, edit_date, active, note, related_object, related_object_uuid
+// -- no `timestamp` field (see due-engine.js's sort-by-create_date).
 export async function listNotesForJob(env, tenantId, jobUuid) {
   return sm8Fetch(env, tenantId, `/note.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
 }

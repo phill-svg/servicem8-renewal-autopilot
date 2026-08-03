@@ -245,7 +245,9 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     try {
       const notes = await listNotesForJob(env, tenantId, job.uuid);
       if (Array.isArray(notes) && notes.length) {
-        const sorted = [...notes].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+        // create_date, not timestamp -- confirmed live via /debug/raw once
+        // read_job_notes was granted; note.json has no `timestamp` field.
+        const sorted = [...notes].sort((a, b) => new Date(b.create_date || 0) - new Date(a.create_date || 0));
         jobNotes = sorted[0]?.note || "";
       }
     } catch (err) {
