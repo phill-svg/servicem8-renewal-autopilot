@@ -21,6 +21,12 @@ function telHref(p) {
   return "tel:" + String(p || "").replace(/[^0-9+]/g, "");
 }
 
+// Inline (self-contained, CSP-safe) Feather-style icons -- currentColor so
+// they inherit the surrounding text colour.
+const IC_PHONE = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
+const IC_CAL = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
+const IC_SEND = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
+
 // ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
 // here (AU format), not the time-of-day the job happened to be closed out.
 function formatDateOnly(s) {
@@ -101,7 +107,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
             <span class="draft-hint">edit before sending if needed</span>
           </div>
           <textarea class="draft-textarea">${escapeHtml(byChannel[pendingChannels[0]].draft_body)}</textarea>
-          <button class="approve-btn">Approve &amp; Send</button>
+          <button class="approve-btn">${IC_SEND}<span>Approve &amp; Send</span></button>
           ${sentNote}
         </div>`;
       }
@@ -121,16 +127,16 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" style="--accent:${s.accent};--rowbg:${s.bg};">
-        <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};">${escapeHtml(statusLabel)}</span></td>
+        <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
           ${r.address_display ? `<div class="cust-addr">${escapeHtml(r.address_display)}</div>` : ""}
-          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone">${escapeHtml(r.contact_phone_cache)}</a>` : ""}
+          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone">${IC_PHONE}${escapeHtml(r.contact_phone_cache)}</a>` : ""}
           ${draftHtml}
         </td>
-        <td class="c-service">${escapeHtml(r.service_name || "Unknown")}</td>
+        <td class="c-service"><span class="svc-tag">${escapeHtml(r.service_name || "Unknown")}</span></td>
         <td class="c-date">
-          <span class="date-val">${escapeHtml(formatDateOnly(r.last_completed_at))}</span>
+          <span class="date-val">${IC_CAL}${escapeHtml(formatDateOnly(r.last_completed_at))}</span>
           ${
             r.last_job_notes_cache
               ? `<details class="job-notes">
@@ -168,102 +174,131 @@ export async function renderDashboardHtml(env, tenantId, token) {
 <title>Renewal Autopilot</title>
 <style>
   :root {
-    --bg: #f5f6f8; --surface: #ffffff; --ink: #1f2430; --muted: #6b7280;
-    --line: #e6e8ec; --brand: #16a34a; --brand-ink: #166534; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.05);
+    --bg: #f4f5f7; --surface: #ffffff; --ink: #0f172a; --ink-2: #334155; --muted: #64748b; --faint: #94a3b8;
+    --line: #eceef1; --line-2: #e2e5ea; --brand: #16a34a; --brand-600: #15803d; --brand-ink: #166534;
+    --sh-sm: 0 1px 2px rgba(15,23,42,.05); --sh-md: 0 1px 3px rgba(15,23,42,.08), 0 1px 2px rgba(15,23,42,.04);
+    --sh-lg: 0 4px 12px rgba(15,23,42,.07), 0 2px 4px rgba(15,23,42,.04);
   }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1040px; margin: 0 auto; padding: 20px 20px 48px; }
+  body { font-family: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  .ic { vertical-align: -1px; flex: none; }
 
-  header.app { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-  .logo { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(140deg, #22c55e, #15803d); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 18px; box-shadow: var(--shadow); flex: none; }
-  h1 { font-size: 19px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
-  .sub { color: var(--muted); font-size: 13px; margin: 2px 0 18px; }
+  /* top app bar */
+  .topbar { position: sticky; top: 0; z-index: 20; background: rgba(255,255,255,.85); backdrop-filter: saturate(1.6) blur(8px); border-bottom: 1px solid var(--line-2); }
+  .topbar-in { max-width: 1080px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 13px; }
+  .logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(145deg, #34d399, #15803d); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 19px; box-shadow: 0 2px 6px rgba(21,128,61,.35); flex: none; }
+  .brand-txt h1 { font-size: 16px; font-weight: 700; margin: 0; letter-spacing: -.012em; line-height: 1.1; }
+  .brand-txt .tag { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  .topbar-count { margin-left: auto; font-size: 12.5px; color: var(--muted); font-weight: 500; background: var(--surface); border: 1px solid var(--line-2); border-radius: 999px; padding: 5px 12px; box-shadow: var(--sh-sm); }
+  .topbar-count b { color: var(--ink); font-weight: 700; }
 
-  .tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 0; }
-  .tab-btn { background: none; border: none; padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 8px 8px 0 0; border-bottom: 2.5px solid transparent; margin-bottom: -1px; transition: color .12s, background .12s; }
-  .tab-btn:hover { color: var(--ink); background: rgba(0,0,0,.03); }
-  .tab-btn.active { color: var(--ink); border-bottom-color: var(--ink); }
-  .contacted-dd { margin-left: 8px; align-self: center; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--shadow); }
-  .contacted-dd:hover { border-color: #cfd3d9; }
-  .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #f0fdf4; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 22px 24px 56px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; font-weight: 500; }
 
-  .toolbar { margin: 16px 0; display: flex; align-items: center; gap: 8px; }
-  .toolbar label { font-size: 13px; color: var(--muted); }
-  .toolbar select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; background: var(--surface); box-shadow: var(--shadow); }
+  /* nav row */
+  .nav { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+  .tabs { display: inline-flex; align-items: center; gap: 3px; background: #eceef2; padding: 4px; border-radius: 11px; }
+  .tab-btn { background: none; border: none; padding: 7px 13px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 8px; transition: all .14s ease; display: inline-flex; align-items: center; gap: 6px; }
+  .tab-btn:hover { color: var(--ink-2); }
+  .tab-btn .n { font-size: 11px; font-weight: 700; color: var(--faint); background: rgba(15,23,42,.06); border-radius: 999px; padding: 1px 6px; min-width: 18px; text-align: center; transition: all .14s; }
+  .tab-btn.active { background: var(--surface); color: var(--ink); box-shadow: var(--sh-md); }
+  .tab-btn.active .n { color: #fff; background: var(--ink); }
+  .contacted-dd { align-self: center; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--sh-sm); transition: all .14s; }
+  .contacted-dd:hover { border-color: #cbd5e1; color: var(--ink-2); }
+  .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #f0fdf4; box-shadow: 0 0 0 3px rgba(22,163,74,.1); }
+  .filter { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .filter label { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+  #service-filter { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--surface); box-shadow: var(--sh-sm); cursor: pointer; }
+  #service-filter:hover { border-color: #cbd5e1; }
 
+  /* table */
   .table-wrap { overflow-x: auto; }
-  table { border-collapse: separate; border-spacing: 0 8px; width: 100%; min-width: 640px; }
-  thead th { text-align: left; padding: 4px 14px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-  thead th:last-child { width: 44px; }
+  table { border-collapse: separate; border-spacing: 0 9px; width: 100%; min-width: 660px; }
+  thead th { text-align: left; padding: 0 16px 2px; color: var(--faint); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+  thead th:last-child { width: 48px; }
 
-  .job-row td { background: var(--rowbg); vertical-align: top; padding: 13px 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: box-shadow .12s, transform .12s; }
-  .job-row td:first-child { border-left: 4px solid var(--accent); border-radius: 10px 0 0 10px; padding-left: 14px; }
-  .job-row td:last-child { border-right: 1px solid var(--line); border-radius: 0 10px 10px 0; }
-  .job-row:hover td { box-shadow: var(--shadow); }
+  .job-row td { background: var(--surface); vertical-align: top; padding: 14px 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: box-shadow .15s ease, transform .15s ease; }
+  .job-row td:first-child { position: relative; border-left: 1px solid var(--line); border-radius: 12px 0 0 12px; padding-left: 20px; }
+  .job-row td:first-child::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 999px; background: var(--accent); }
+  .job-row td:last-child { border-right: 1px solid var(--line); border-radius: 0 12px 12px 0; }
+  .job-row:hover td { box-shadow: var(--sh-lg); border-color: var(--line-2); }
+  .job-row:hover td:first-child { border-left-color: var(--line-2); }
 
-  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700; white-space: nowrap; }
-  .cust-name { font-weight: 650; font-size: 14px; }
-  .cust-addr { font-size: 12px; color: var(--muted); margin-top: 1px; white-space: pre-line; }
-  .cust-phone { display: inline-block; margin-top: 3px; font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px 4px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; text-transform: uppercase; }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .cust-name { font-weight: 650; font-size: 14px; letter-spacing: -.005em; }
+  .cust-addr { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: pre-line; line-height: 1.4; }
+  .cust-phone { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; font-size: 12.5px; font-weight: 600; color: var(--accent); text-decoration: none; }
   .cust-phone:hover { text-decoration: underline; }
-  .c-service { font-size: 13px; color: #374151; }
-  .c-date { font-size: 13px; color: #374151; white-space: nowrap; }
-  .date-val { font-variant-numeric: tabular-nums; }
-  .job-notes { margin-top: 5px; }
-  .job-notes summary { cursor: pointer; font-size: 11px; color: var(--muted); list-style: none; user-select: none; }
+  .svc-tag { display: inline-block; font-size: 12px; font-weight: 600; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; }
+  .c-date { white-space: nowrap; }
+  .date-val { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 550; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .date-val .ic { color: var(--faint); }
+  .job-notes { margin-top: 6px; }
+  .job-notes summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
+  .job-notes summary:hover { color: var(--ink-2); }
   .job-notes summary::-webkit-details-marker { display: none; }
-  .job-notes summary::before { content: "\\25B8 "; font-size: 9px; }
-  .job-notes[open] summary::before { content: "\\25BE "; }
-  .job-notes-body { font-size: 12px; color: #4b5563; margin-top: 5px; max-width: 240px; white-space: pre-line; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+  .job-notes summary::before { content: "\\25B8"; font-size: 8px; }
+  .job-notes[open] summary::before { content: "\\25BE"; }
+  .job-notes-body { font-size: 12px; color: var(--ink-2); margin-top: 6px; max-width: 240px; white-space: pre-line; line-height: 1.45; background: #f8fafc; border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; }
 
-  .draft-none { margin-top: 7px; font-size: 12px; color: #9aa0aa; }
-  .sent-row { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .sent-chip { font-size: 11.5px; font-weight: 600; color: var(--brand-ink); background: #dcfce7; border-radius: 999px; padding: 2px 9px; }
-  .draft-card { margin-top: 9px; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); max-width: 460px; }
-  .draft-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-  .channel-select { font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--line); background: #fff; }
-  .draft-hint { font-size: 12px; color: var(--muted); }
-  .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.45; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; min-height: 5em; margin-bottom: 8px; color: var(--ink); }
-  .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.12); }
-  .approve-btn { background: var(--brand); color: #fff; border: none; border-radius: 8px; padding: 8px 15px; font-size: 12.5px; font-weight: 650; cursor: pointer; transition: background .12s; }
-  .approve-btn:hover:not(:disabled) { background: #15803d; }
-  .approve-btn:disabled { opacity: .65; cursor: default; }
+  /* draft composer */
+  .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
+  .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .sent-chip { font-size: 11px; font-weight: 700; color: var(--brand-ink); background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .draft-card { margin-top: 10px; padding: 11px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 11px; max-width: 470px; }
+  .draft-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .channel-select { font-size: 11.5px; font-weight: 700; letter-spacing: .03em; padding: 5px 9px; border-radius: 8px; border: 1px solid var(--line-2); background: #fff; color: var(--ink-2); cursor: pointer; }
+  .draft-hint { font-size: 11.5px; color: var(--faint); }
+  .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.5; padding: 10px 11px; border: 1px solid var(--line-2); border-radius: 9px; resize: vertical; min-height: 5.2em; margin-bottom: 9px; color: var(--ink); background: #fff; transition: border-color .12s, box-shadow .12s; }
+  .draft-textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(22,163,74,.13); }
+  .approve-btn { display: inline-flex; align-items: center; gap: 7px; background: var(--brand); color: #fff; border: none; border-radius: 9px; padding: 9px 16px; font-size: 12.5px; font-weight: 650; cursor: pointer; box-shadow: 0 1px 2px rgba(21,128,61,.35); transition: background .13s, transform .06s; }
+  .approve-btn:hover:not(:disabled) { background: var(--brand-600); }
+  .approve-btn:active:not(:disabled) { transform: translateY(1px); }
+  .approve-btn:disabled { opacity: .6; cursor: default; box-shadow: none; }
 
-  .dismiss-btn { background: none; border: 1px solid var(--line); border-radius: 50%; width: 26px; height: 26px; line-height: 1; font-size: 15px; color: #9aa0aa; cursor: pointer; transition: all .12s; }
+  .dismiss-btn { background: none; border: 1px solid var(--line-2); border-radius: 8px; width: 30px; height: 30px; line-height: 1; font-size: 17px; color: var(--faint); cursor: pointer; transition: all .13s; }
   .dismiss-btn:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
-  .empty-state, #empty-filtered { padding: 40px 20px; text-align: center; color: var(--muted); background: var(--surface); border: 1px dashed var(--line); border-radius: 12px; font-size: 14px; }
-  #empty-filtered { display: none; margin-top: 4px; }
+  .empty-state, #empty-filtered { padding: 52px 24px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; font-size: 14px; line-height: 1.6; box-shadow: var(--sh-sm); max-width: 520px; margin: 0 auto; }
+  #empty-filtered { display: none; margin-top: 9px; }
 
-  @media (max-width: 560px) {
-    .wrap { padding: 16px 12px 40px; }
-    .tab-btn { padding: 8px 10px; }
+  @media (max-width: 620px) {
+    .topbar-in, .wrap { padding-left: 14px; padding-right: 14px; }
+    .filter { margin-left: 0; width: 100%; }
+    #service-filter { flex: 1; }
+    .topbar-count { display: none; }
   }
 </style>
 </head>
 <body>
+<div class="topbar"><div class="topbar-in">
+  <div class="logo">&#8635;</div>
+  <div class="brand-txt"><h1>Renewal Autopilot</h1><div class="tag">Renewal reminder queue</div></div>
+  <div class="topbar-count"><b>${(dueCustomers || []).length}</b> tracked</div>
+</div></div>
 <div class="wrap">
-<header class="app"><div class="logo">&#8635;</div><h1>Renewal Autopilot</h1></header>
 <div class="sub" id="sub-count">${actionableCount} customer${actionableCount === 1 ? "" : "s"} due for renewal</div>
-<div class="tabs">
-  <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
-  <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
-  <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
-  <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later (${counts.due_later})</button>
+<div class="nav">
+  <div class="tabs">
+    <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue <span class="n">${counts.overdue}</span></button>
+    <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now <span class="n">${counts.due}</span></button>
+    <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon <span class="n">${counts.due_soon}</span></button>
+    <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later <span class="n">${counts.due_later}</span></button>
+  </div>
   <select id="contacted-select" class="contacted-dd" aria-label="View contacted customers">
     <option value="">Contacted &#9662;</option>
     <option value="contacted1">Contacted 1 (${counts.contacted1})</option>
     <option value="contacted2">Contacted 2 (${counts.contacted2})</option>
     <option value="contacted3">Contacted 3 (${counts.contacted3})</option>
   </select>
-</div>
-<div class="toolbar">
-  <label for="service-filter">Filter by service</label>
-  <select id="service-filter">
-    <option value="">All services (${(dueCustomers || []).length})</option>
-    ${filterOptions}
-  </select>
+  <div class="filter">
+    <label for="service-filter">Service</label>
+    <select id="service-filter">
+      <option value="">All services (${(dueCustomers || []).length})</option>
+      ${filterOptions}
+    </select>
+  </div>
 </div>
 ${
   rows
