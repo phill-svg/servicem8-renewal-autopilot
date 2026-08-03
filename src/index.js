@@ -256,25 +256,46 @@ function addonErrorHtml(message) {
 
 // Resolves our internal tenant_id from the addon callback JWT's real
 // ServiceM8 accountUUID. Opportunistically backfills tenants.resolved_account_uuid
-// the first time this fires for a tenant. The "only one tenant exists"
-// fallback below is a deliberate simplification for Phase 1/2 testing with a
-// single real tenant (TCB) -- it MUST be removed before a second tenant
-// installs, since it would silently misattribute the dashboard to the wrong
-// account otherwise.
+// the first time this fires for a tenant.
+//
+// There's no confirmed "whoami" API call to learn the real accountUUID right
+// at install time (see plan's open risks), so a fresh tenant row sits
+// unresolved until its first addon-callback JWT arrives. Every retried
+// install (e.g. "installation failed, please try again") creates another
+// unresolved row via handleOAuthCallback -- rather than requiring exactly one
+// to exist (which broke the very first time Phill retried install a few
+// times), pick whichever unresolved active tenant has the most recently
+// issued OAuth token as "the install ServiceM8 currently has authorized",
+// and retire the older duplicates so they can never shadow it again. This is
+// still a single-real-tenant simplification, not true multi-tenant
+// disambiguation -- must be revisited before a second real tenant installs.
 async function resolveTenantFromAccountUuid(env, accountUuid) {
   const byResolved = await env.DB.prepare("SELECT * FROM tenants WHERE resolved_account_uuid = ?").bind(accountUuid).first();
   if (byResolved) return byResolved;
 
-  const { results: allTenants } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active'").all();
-  if ((allTenants || []).length !== 1) {
-    console.error(`resolveTenantFromAccountUuid: cannot uniquely resolve tenant for account ${accountUuid} -- ${(allTenants || []).length} active tenants on file`);
+  const { results: candidates } = await env.DB.prepare(
+    `SELECT t.* FROM tenants t
+     JOIN oauth_tokens o ON o.tenant_id = t.servicem8_account_uuid
+     WHERE t.status = 'active' AND t.resolved_account_uuid IS NULL
+     ORDER BY o.updated_at DESC`
+  ).all();
+  if (!candidates || candidates.length === 0) {
+    console.error(`resolveTenantFromAccountUuid: no unresolved active tenant candidates for account ${accountUuid}`);
     return null;
   }
-  const only = allTenants[0];
+
+  const winner = candidates[0];
   await env.DB.prepare("UPDATE tenants SET resolved_account_uuid = ? WHERE servicem8_account_uuid = ?")
-    .bind(accountUuid, only.servicem8_account_uuid)
+    .bind(accountUuid, winner.servicem8_account_uuid)
     .run();
-  return only;
+
+  for (const stale of candidates.slice(1)) {
+    await env.DB.prepare("UPDATE tenants SET status = 'uninstalled', uninstalled_at = ? WHERE servicem8_account_uuid = ?")
+      .bind(Date.now(), stale.servicem8_account_uuid)
+      .run();
+  }
+
+  return winner;
 }
 
 function dashboardRedirectHtml(dashboardUrl) {
