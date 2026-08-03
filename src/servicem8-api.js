@@ -72,6 +72,21 @@ export async function listBadges(env, tenantId) {
   return sm8Fetch(env, tenantId, `/badge.json`);
 }
 
+// Updates an existing badge -- used to force ServiceM8 to re-fetch a changed
+// sprite image at the same file_name URL (it appears to cache/copy the image
+// at creation time rather than proxying it live).
+export async function updateBadge(env, tenantId, badgeUuid, { fileUrl }) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${API_BASE}/badge/${badgeUuid}.json`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ file_name: fileUrl }),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API POST /badge/${badgeUuid}.json failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
+  }
+}
+
 // Creates a Badge -- name is required, file_name is an optional public URL to
 // a custom 3-state sprite PNG (inactive/hover/active stacked vertically,
 // confirmed via ServiceM8 community docs: "don't change the dimensions, just

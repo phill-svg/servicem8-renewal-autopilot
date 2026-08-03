@@ -33,7 +33,7 @@ export async function ensureRenewalBadgesAndDefaultRule(env, tenantId, origin) {
     console.error(`ensureRenewalBadges: failed to list existing badges for tenant ${tenantId}`, err);
   }
   const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
-  const fileUrl = `${origin}/assets/images/badge-green-sprite.png`;
+  const fileUrl = `${origin}/assets/images/badge-green-sprite-v2.png`;
 
   const uuidByName = {};
   for (const name of RENEWAL_BADGE_NAMES) {

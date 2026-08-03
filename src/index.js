@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge, listBadges, updateBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -542,6 +542,38 @@ async function handleDebugCreateBadges(request, env) {
   return json({ results });
 }
 
+// One-time fix: the first sprite was square/dark-green; ServiceM8 appears to
+// copy the image at creation time rather than proxying it live, so pointing
+// existing badges at the same URL again wouldn't necessarily refresh what's
+// shown -- update to the new versioned filename instead.
+async function handleDebugUpdateBadgeIcons(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const origin = new URL(request.url).origin;
+  const fileUrl = `${origin}/assets/images/badge-green-sprite-v2.png`;
+  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
+  try {
+    const badges = (await listBadges(env, tenantId)) || [];
+    const results = [];
+    for (const name of names) {
+      const badge = badges.find((b) => b.name === name);
+      if (!badge) {
+        results.push({ name, ok: false, error: "badge not found" });
+        continue;
+      }
+      try {
+        await updateBadge(env, tenantId, badge.uuid, { fileUrl });
+        results.push({ name, uuid: badge.uuid, ok: true });
+      } catch (err) {
+        results.push({ name, uuid: badge.uuid, ok: false, error: String(err && err.message) });
+      }
+    }
+    return json({ results });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugRaw(request, env) {
   const url = new URL(request.url);
   const tenantId = url.searchParams.get("tenant");
@@ -664,6 +696,7 @@ export default {
     if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
+    if (pathname === "/debug/update-badge-icons" && method === "POST") return handleDebugUpdateBadgeIcons(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {
