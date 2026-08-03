@@ -103,7 +103,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
       // nothing left to do.
       const alreadyContacted = drafts.length > 0 && !pendingChannels.length;
 
-      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" style="background:${s.bg};border-left:4px solid ${s.border}">
+      const html = `<tr data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(r.bucket)}" style="background:${s.bg};border-left:4px solid ${s.border}">
         <td style="padding:10px;font-weight:600;color:${s.text};vertical-align:top;">${escapeHtml(s.label)}</td>
         <td style="padding:10px;vertical-align:top;">
           <div style="font-weight:600;">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -134,9 +134,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .sub { color: #666; font-size: 13px; margin-bottom: 18px; }
   table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
   th { text-align: left; padding: 10px; background: #2b2b30; color: #fff; font-size: 12px; text-transform: uppercase; }
-  .legend span { display:inline-flex; align-items:center; gap:6px; margin-right:18px; font-size:13px; }
-  .swatch { width:14px; height:14px; display:inline-block; }
-  .toolbar { margin-bottom: 14px; display:flex; align-items:center; gap:8px; }
+  .tabs { display:flex; gap:0; margin-bottom:0; border-bottom:2px solid #e6e6ea; }
+  .tab-btn { background:none; border:none; padding:10px 18px; font-size:13px; font-weight:600; color:#666; cursor:pointer; border-bottom:3px solid transparent; margin-bottom:-2px; }
+  .tab-btn.active { color:#222; border-bottom-color:#2b2b30; }
+  .toolbar { margin: 14px 0; display:flex; align-items:center; gap:8px; }
   .toolbar select { padding:6px 10px; border-radius:4px; border:1px solid #ccc; font-size:13px; }
   #empty-filtered { display:none; padding:20px; text-align:center; color:#999; background:#fff; }
 </style>
@@ -144,10 +145,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
 <body>
 <h1>Renewal Autopilot</h1>
 <div class="sub" id="sub-count">${allRowsData.filter((r) => !r.alreadyContacted).length} customer(s) due for renewal</div>
-<div class="legend">
-  <span><span class="swatch" style="background:${STYLE.overdue.bg};border-left:4px solid ${STYLE.overdue.border}"></span>Overdue (${counts.overdue})</span>
-  <span><span class="swatch" style="background:${STYLE.due.bg};border-left:4px solid ${STYLE.due.border}"></span>Due now (${counts.due})</span>
-  <span><span class="swatch" style="background:${STYLE.due_soon.bg};border-left:4px solid ${STYLE.due_soon.border}"></span>Due soon (${counts.due_soon})</span>
+<div class="tabs">
+  <button class="tab-btn${counts.overdue ? " active" : ""}" data-tab-bucket="overdue">Overdue (${counts.overdue})</button>
+  <button class="tab-btn${!counts.overdue && counts.due ? " active" : ""}" data-tab-bucket="due">Due now (${counts.due})</button>
+  <button class="tab-btn${!counts.overdue && !counts.due ? " active" : ""}" data-tab-bucket="due_soon">Due soon (${counts.due_soon})</button>
 </div>
 <div class="toolbar">
   <label for="service-filter" style="font-size:13px;color:#666;">Filter by service:</label>
@@ -176,17 +177,32 @@ ${
 <script>
   var filterSelect = document.getElementById('service-filter');
   var allRows = Array.prototype.slice.call(document.querySelectorAll('#due-table tbody tr[data-service]'));
-  filterSelect.addEventListener('change', function () {
-    var value = filterSelect.value;
+  var tabBtns = Array.prototype.slice.call(document.querySelectorAll('.tab-btn'));
+  var activeBucket = (tabBtns.find(function (b) { return b.classList.contains('active'); }) || {}).dataset;
+  activeBucket = activeBucket ? activeBucket.tabBucket : 'overdue';
+
+  function applyFilters() {
+    var serviceValue = filterSelect.value;
     var visibleCount = 0;
     allRows.forEach(function (row) {
-      var match = !value || row.dataset.service === value;
+      var match = row.dataset.bucket === activeBucket && (!serviceValue || row.dataset.service === serviceValue);
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
-    document.getElementById('sub-count').textContent = visibleCount + ' customer(s) due for renewal' + (value ? ' -- ' + value : '');
+    document.getElementById('sub-count').textContent = visibleCount + ' customer(s) due for renewal' + (serviceValue ? ' -- ' + serviceValue : '');
     document.getElementById('empty-filtered').style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
+  }
+
+  tabBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      activeBucket = btn.dataset.tabBucket;
+      applyFilters();
+    });
   });
+  filterSelect.addEventListener('change', applyFilters);
+  applyFilters();
 
   document.querySelectorAll('.draft-card').forEach(function (card) {
     var select = card.querySelector('.channel-select');
@@ -235,8 +251,7 @@ ${
           var row = document.querySelector('tr[data-row-id="' + rowId + '"]');
           if (row) row.remove();
           allRows = allRows.filter(function (r) { return r.dataset.rowId !== rowId; });
-          var visible = allRows.filter(function (r) { return r.style.display !== 'none'; }).length;
-          document.getElementById('sub-count').textContent = visible + ' customer(s) due for renewal';
+          applyFilters();
         } else {
           btn.disabled = false;
         }
@@ -271,18 +286,23 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
 
   try {
+    // regardingJobUuid deliberately omitted -- confirmed live (2026-08-03)
+    // that ServiceM8 silently rejects a send as a duplicate
+    // ("SMS Message has already been sent (Not sending again)") whenever the
+    // referenced job already has ANY prior message logged against it, which
+    // is common for a customer's last completed job in normal business use.
+    // Omitting it avoids the false-positive dedup at the cost of the message
+    // not being tied to a specific job in ServiceM8's own UI.
     if (draft.channel === "sms") {
       await sendPlatformSms(env, tenantId, {
         to: dueCustomer.contact_phone_cache,
         message: body,
-        regardingJobUuid: dueCustomer.last_job_uuid,
       });
     } else {
       await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
         subject: draft.draft_subject || "Time for your next pest treatment",
         textBody: body,
-        regardingJobUuid: dueCustomer.last_job_uuid,
       });
     }
     await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
