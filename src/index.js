@@ -554,9 +554,9 @@ async function handleDebugUpdateBadgeIcons(request, env) {
   // the "CHASE PAYMENT" style Phill pointed to (a solid color circle with
   // just text, made via ServiceM8's own "no icon" picker option).
   const fileByName = {
-    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month.png`,
-    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month.png`,
-    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year.png`,
+    "Renewal Autopilot - 3 Month": `${origin}/assets/images/badge-3month-v2.png`,
+    "Renewal Autopilot - 6 Month": `${origin}/assets/images/badge-6month-v2.png`,
+    "Renewal Autopilot - 1 Year": `${origin}/assets/images/badge-1year-v2.png`,
   };
   try {
     const badges = (await listBadges(env, tenantId)) || [];
