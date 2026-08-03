@@ -10,7 +10,53 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge } from "./servicem8-api.js";
+
+// Renewal Autopilot's own badges, auto-created in every installing tenant's
+// ServiceM8 account so a new business doesn't have to hand-make one before
+// the add-on is useful. Each points at a generic pre-designed 3-state sprite
+// (64x192, three stacked 64x64 states -- the format ServiceM8 requires) that
+// just shows the cadence in plain text ("1 YEAR" / "6 MONTH" / "3 MONTH"), so
+// they're business-agnostic. These are the exact images TCB's own live
+// badges use, confirmed to render correctly in ServiceM8. A bare API-created
+// badge with no image renders blank (verified 2026-08-04), which is why a
+// real file_name is essential here rather than relying on ServiceM8 to draw
+// the badge itself.
+const RENEWAL_BADGES = [
+  { name: "Renewal - 3 Month", file: "phill-3month-v1.png", intervalMonths: 3 },
+  { name: "Renewal - 6 Month", file: "phill-6month-v1.png", intervalMonths: 6 },
+  { name: "Renewal - 1 Year", file: "phill-1year-final.png", intervalMonths: 12 },
+];
+
+// Idempotent -- safe to run on every install. Looks up existing badges by
+// exact name first (ServiceM8 badges are account-level, so a reinstall or a
+// re-run never duplicates them), creating only the missing ones. Returns a
+// { name: uuid } map of all Renewal badges now present. Does NOT wire a
+// tracking rule -- that's the setup wizard's job (the business picks which
+// cadence to track and confirms the interval/templates).
+export async function ensureRenewalBadges(env, tenantId, origin) {
+  let existing = [];
+  try {
+    existing = (await listBadges(env, tenantId)) || [];
+  } catch (err) {
+    console.error(`ensureRenewalBadges: failed to list badges for tenant ${tenantId}`, err);
+  }
+  const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
+
+  const uuidByName = {};
+  for (const { name, file } of RENEWAL_BADGES) {
+    if (existingByName.has(name)) {
+      uuidByName[name] = existingByName.get(name);
+      continue;
+    }
+    try {
+      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl: `${origin}/assets/images/${file}` });
+    } catch (err) {
+      console.error(`ensureRenewalBadges: failed to create badge "${name}" for tenant ${tenantId}`, err);
+    }
+  }
+  return uuidByName;
+}
 
 // Dispatches a tracking rule to the right job-fetch strategy. See
 // schema.sql's category_config comment for why a rule can be either kind.

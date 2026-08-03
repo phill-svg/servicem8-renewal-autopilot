@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, createBadge, deleteBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -103,13 +103,18 @@ async function handleOAuthCallback(request, env, ctx) {
   if (ctx && ctx.waitUntil) ctx.waitUntil(registerWebhooks);
   else await registerWebhooks;
 
-  // Deliberately does NOT auto-create a badge for the tenant (see
-  // 2026-08-03: ServiceM8's API has no colour field and never overlays the
-  // badge name as text on a custom-image badge -- only badges created
-  // through ServiceM8's own UI, picking "no icon" + a colour, get that
-  // native look). Every tenant creates their own renewal badge natively and
-  // tells the setup wizard which one to track -- same flow as configuring a
-  // category-based rule.
+  // Auto-create Renewal Autopilot's badges in the new account so the business
+  // has something to apply to jobs immediately, rather than hand-making one
+  // first. Uses generic pre-designed sprite images (see ensureRenewalBadges)
+  // -- a bare API-created badge with no image renders blank, so a real image
+  // is required. Which cadence to actually track is chosen later in the setup
+  // wizard; this just provisions the badges. Non-fatal if it fails (the
+  // business can still make a badge manually), so it never blocks install.
+  const provisionBadges = ensureRenewalBadges(env, tenantId, url.origin).catch((err) =>
+    console.error(`install: badge provisioning failed for tenant ${tenantId}`, err)
+  );
+  if (ctx && ctx.waitUntil) ctx.waitUntil(provisionBadges);
+  else await provisionBadges;
 
   return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
 }
@@ -469,13 +474,23 @@ async function handleDebugCategories(request, env) {
   }
 }
 
+// TEMPORARY test harness (to be removed): ?delete=<uuid> retires a badge;
+// otherwise runs ensureRenewalBadges to verify auto-provisioning produces
+// correctly-rendered badges against a real account before trusting the
+// install-time path.
 async function handleDebugSpikeNoIconBadge(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
-  const tenantId = new URL(request.url).searchParams.get("tenant");
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const del = url.searchParams.get("delete");
   if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
   try {
-    await deleteBadge(env, tenantId, "019fc8ae-0761-7e29-bef1-67700798559b");
-    return json({ ok: true });
+    if (del) {
+      await deleteBadge(env, tenantId, del);
+      return json({ deleted: del });
+    }
+    const map = await ensureRenewalBadges(env, tenantId, url.origin);
+    return json({ map });
   } catch (err) {
     return json({ error: String(err && err.message) }, { status: 502 });
   }
