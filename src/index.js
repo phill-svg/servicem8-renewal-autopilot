@@ -6,9 +6,9 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet } from "./servicem8-api.js";
+import { getJob, listCategories, getPrimaryContact, listAllCompletedJobs, listOpenJobsForCompany, listCompletedJobsForCategory, updateJobCategory, rawGet, createBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, ensureRenewalBadgesAndDefaultRule } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft } from "./dashboard.js";
 
@@ -115,6 +115,14 @@ async function handleOAuthCallback(request, env, ctx) {
   const registerWebhooks = registerAllWebhooks(env, tenantId, callbackUrl);
   if (ctx && ctx.waitUntil) ctx.waitUntil(registerWebhooks);
   else await registerWebhooks;
+
+  // Awaited (not backgrounded) so the tenant has a working default rule the
+  // moment install finishes, not some indeterminate time later.
+  try {
+    await ensureRenewalBadgesAndDefaultRule(env, tenantId, url.origin);
+  } catch (err) {
+    console.error(`oauth callback: failed to set up renewal badges for tenant ${tenantId}`, err);
+  }
 
   return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
 }
@@ -512,6 +520,28 @@ async function handleDebugReclassifyStandard(request, env) {
   return json({ results });
 }
 
+// One-time setup: fresh green-branded badges for Renewal Autopilot, distinct
+// from TCB's existing "3/6 Month Follow-up"/"1 Year Follow-up" badges so as
+// not to disturb whatever those are already used for. Only the 1-year one is
+// wired into a tracking rule for now -- see /debug/configure-category.
+async function handleDebugCreateBadges(request, env) {
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const origin = new URL(request.url).origin;
+  const fileUrl = `${origin}/assets/images/badge-green-sprite.png`;
+  const names = ["Renewal Autopilot - 3 Month", "Renewal Autopilot - 6 Month", "Renewal Autopilot - 1 Year"];
+  const results = [];
+  for (const name of names) {
+    try {
+      const uuid = await createBadge(env, tenantId, { name, fileUrl });
+      results.push({ name, uuid, ok: true });
+    } catch (err) {
+      results.push({ name, ok: false, error: String(err && err.message) });
+    }
+  }
+  return json({ results });
+}
+
 async function handleDebugRaw(request, env) {
   const url = new URL(request.url);
   const tenantId = url.searchParams.get("tenant");
@@ -633,6 +663,7 @@ export default {
     if (pathname === "/debug/sample-jobs" && method === "GET") return handleDebugSampleJobs(request, env);
     if (pathname === "/debug/reclassify-standard" && method === "POST") return handleDebugReclassifyStandard(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
+    if (pathname === "/debug/create-badges" && method === "POST") return handleDebugCreateBadges(request, env);
     if (pathname === "/debug/open-jobs" && method === "GET") return handleDebugOpenJobs(request, env);
 
     if (pathname === "/") {

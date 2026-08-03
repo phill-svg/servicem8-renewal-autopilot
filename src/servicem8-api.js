@@ -68,6 +68,32 @@ export async function rawGet(env, tenantId, pathAndQuery) {
   return sm8Fetch(env, tenantId, pathAndQuery);
 }
 
+export async function listBadges(env, tenantId) {
+  return sm8Fetch(env, tenantId, `/badge.json`);
+}
+
+// Creates a Badge -- name is required, file_name is an optional public URL to
+// a custom 3-state sprite PNG (inactive/hover/active stacked vertically,
+// confirmed via ServiceM8 community docs: "don't change the dimensions, just
+// edit the three examples in place" -- exact pixel size undocumented).
+// Requires manage_badges scope. Like other ServiceM8 create endpoints, the
+// response body is empty -- the new UUID comes back in the x-record-uuid
+// header (mirrors tcbpestcontriol/src/servicem8.js's sm8Create).
+export async function createBadge(env, tenantId, { name, fileUrl }) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${API_BASE}/badge.json`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ name, ...(fileUrl ? { file_name: fileUrl } : {}) }),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API POST /badge.json failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
+  }
+  const uuid = res.headers.get("x-record-uuid");
+  if (!uuid) throw new Error("ServiceM8 POST /badge.json returned no record UUID");
+  return uuid;
+}
+
 // Updates fields on an existing job -- ServiceM8's REST convention is POST to
 // the record's own .json URL with only the changed fields (same shape as
 // creating, per their docs). Used for one-off historical-data cleanup (see
