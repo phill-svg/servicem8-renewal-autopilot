@@ -16,6 +16,14 @@ function telHref(p) {
   return "tel:" + String(p || "").replace(/[^0-9+]/g, "");
 }
 
+// ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
+// here (AU format), not the time-of-day the job happened to be closed out.
+function formatDateOnly(s) {
+  const datePart = String(s || "").split(" ")[0];
+  const [y, m, d] = datePart.split("-");
+  return y && m && d ? `${d}/${m}/${y}` : datePart;
+}
+
 export async function renderDashboardHtml(env, tenantId, token) {
   const { results: dueCustomers } = await env.DB.prepare(
     `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL ORDER BY bucket, last_completed_at`
@@ -117,7 +125,17 @@ export async function renderDashboardHtml(env, tenantId, token) {
           ${draftHtml}
         </td>
         <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.service_name || "Unknown")}</td>
-        <td style="padding:10px;vertical-align:top;font-size:13px;">${escapeHtml(r.last_completed_at || "")}</td>
+        <td style="padding:10px;vertical-align:top;font-size:13px;">
+          ${escapeHtml(formatDateOnly(r.last_completed_at))}
+          ${
+            r.last_job_notes_cache
+              ? `<details style="margin-top:4px;">
+            <summary style="cursor:pointer;font-size:11px;color:#888;">Show job</summary>
+            <div style="font-size:12px;color:#555;margin-top:4px;max-width:220px;">${escapeHtml(r.last_job_notes_cache)}</div>
+          </details>`
+              : ""
+          }
+        </td>
         <td style="padding:10px;vertical-align:top;text-align:center;">
           <button data-dismiss="${escapeHtml(r.id)}" class="dismiss-btn" title="Remove from this list" style="background:none;border:1px solid #ccc;border-radius:50%;width:24px;height:24px;line-height:1;font-size:14px;color:#666;cursor:pointer;">&times;</button>
         </td>

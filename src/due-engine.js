@@ -228,8 +228,8 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
       `INSERT INTO due_customers (
          id, tenant_id, category_config_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
          last_job_uuid, last_completed_at, bucket, suppressed_reason, dismissed_at,
-         contact_name_cache, contact_email_cache, contact_phone_cache, computed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+         contact_name_cache, contact_email_cache, contact_phone_cache, last_job_notes_cache, computed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
        ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, category_config_id) DO UPDATE SET
          servicem8_category_uuid = excluded.servicem8_category_uuid,
          last_job_uuid = excluded.last_job_uuid,
@@ -243,6 +243,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
          contact_name_cache = excluded.contact_name_cache,
          contact_email_cache = excluded.contact_email_cache,
          contact_phone_cache = excluded.contact_phone_cache,
+         last_job_notes_cache = excluded.last_job_notes_cache,
          computed_at = excluded.computed_at
        RETURNING id`
     )
@@ -261,6 +262,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
         contact?.name || "",
         contact?.email || "",
         contact?.mobile || contact?.phone || "",
+        job.work_done_description || "",
         now
       )
       .first();

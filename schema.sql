@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS due_customers (
   contact_name_cache       TEXT,
   contact_email_cache      TEXT,
   contact_phone_cache      TEXT,
+  last_job_notes_cache     TEXT, -- job.work_done_description of the triggering job -- a short teaser of the tech's own notes, shown in the dashboard
   computed_at              INTEGER NOT NULL,
   -- Follow-up sequence state (2026-08-04): reminder_round is "the next round
   -- not yet sent" -- starts at 1 (nothing sent), becomes 2 once round 1 is
