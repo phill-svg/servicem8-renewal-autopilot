@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories } from "./servicem8-api.js";
+import { getJob, listCategories, createBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -469,6 +469,23 @@ async function handleDebugCategories(request, env) {
   }
 }
 
+// TEMPORARY spike, to be removed immediately after use -- tests whether a
+// badge created via the API with NO file_name renders with ServiceM8's own
+// native "no icon, colored, auto-text-overlay" look (the "CHASE PAYMENT"
+// style), which was never actually tried this session (every prior attempt
+// forced a custom sprite image).
+async function handleDebugSpikeNoIconBadge(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  try {
+    const uuid = await createBadge(env, tenantId, { name: "SPIKE no-icon test" });
+    return json({ uuid, ok: true });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 // Configures a tracking rule -- either signalType "category" (categoryUuid)
 // or "badge" (badgeUuid). No DB-level unique constraint on the target uuid
 // since a tenant may have several rules of either kind; upsert is done by
@@ -554,6 +571,7 @@ export default {
     if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
 
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
+    if (pathname === "/debug/spike-no-icon-badge" && method === "POST") return handleDebugSpikeNoIconBadge(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
