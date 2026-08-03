@@ -247,6 +247,22 @@ export async function listOpenJobsForCompany(env, tenantId, companyUuid) {
   return (jobs || []).filter((j) => !CLOSED_STATUSES.has(j.status));
 }
 
+// A job's actual tech-written notes (e.g. "No issues, paid cc") -- a
+// separate object from the job record itself, gated behind its own
+// read_job_notes scope (confirmed live via a 403 "insufficient_scope").
+// work_done_description on the job record is NOT this -- it's usually just a
+// restatement of the service type ("Premium pest treatment"), sometimes
+// blank, and duplicates what the category already shows.
+//
+// NEEDS LIVE CONFIRMATION once read_job_notes is granted: filter field
+// assumed related_object_uuid/related_object, matching dboattachment's
+// polymorphic-attachment convention seen elsewhere in this account's data --
+// could instead be a direct job_uuid column. Check the real shape via
+// /debug/raw before trusting this in production.
+export async function listNotesForJob(env, tenantId, jobUuid) {
+  return sm8Fetch(env, tenantId, `/note.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
+}
+
 // Job Categories configured on the tenant's account, for the setup wizard's
 // category picker (Phase 2) -- NEEDS LIVE CONFIRMATION of the resource name;
 // assumed `category.json` by ServiceM8's general naming convention

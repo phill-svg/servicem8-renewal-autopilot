@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listBadges, createBadge } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listBadges, createBadge, listCategories, listNotesForJob } from "./servicem8-api.js";
 
 // Renewal Autopilot's own green-branded badges, created fresh in every
 // installing tenant's account rather than reusing whatever follow-up badges
@@ -172,12 +172,32 @@ export async function backfillChunk(env, tenant) {
   }
 }
 
+// A warranty callback (free re-treatment if pests come back within the
+// warranty period) isn't a real renewal-driving service visit -- it's a
+// follow-up ON the job it's warrantying, not a fresh 12-month cycle. If one
+// happens to be a customer's most recently *completed* job, picking it as
+// the "last service" would push their due date out based on a free callback
+// instead of their actual last paid treatment. Matched by name (not a
+// hardcoded uuid) since category uuids are tenant-specific.
+async function getWarrantyCategoryUuids(env, tenantId) {
+  try {
+    const categories = await listCategories(env, tenantId);
+    return new Set((categories || []).filter((c) => /warranty/i.test(c.name || "")).map((c) => c.uuid));
+  } catch (err) {
+    console.error(`due-engine: failed to load categories for tenant ${tenantId}`, err);
+    return new Set();
+  }
+}
+
 // Groups raw jobs by (company_uuid, normalized street address), keeps the
 // most-recently-completed job per group, and upserts a candidate row --
 // shared by both the backfill path and the live webhook-triggered path.
 async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
+  const warrantyCategoryUuids = await getWarrantyCategoryUuids(env, tenantId);
+
   const groups = new Map();
   for (const job of jobs) {
+    if (warrantyCategoryUuids.has(job.category_uuid)) continue; // see getWarrantyCategoryUuids
     const completedAt = parseServiceM8Date(job.completion_date);
     if (!completedAt || !job.company_uuid) continue;
     const key = `${job.company_uuid}|${normalizeStreet(job.job_address)}`;
@@ -216,6 +236,20 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
       contact = await getPrimaryContact(env, tenantId, job.company_uuid);
     } catch (err) {
       console.error(`due-engine: contact lookup failed for company ${job.company_uuid}:`, err);
+    }
+
+    // Real tech notes for the "Show job" teaser (src/dashboard.js) -- most
+    // recent note first, since that's usually the on-site wrap-up ("No
+    // issues, paid cc") rather than an earlier scheduling note.
+    let jobNotes = "";
+    try {
+      const notes = await listNotesForJob(env, tenantId, job.uuid);
+      if (Array.isArray(notes) && notes.length) {
+        const sorted = [...notes].sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+        jobNotes = sorted[0]?.note || "";
+      }
+    } catch (err) {
+      console.error(`due-engine: notes lookup failed for job ${job.uuid}:`, err);
     }
 
     const now = Date.now();
@@ -262,7 +296,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
         contact?.name || "",
         contact?.email || "",
         contact?.mobile || contact?.phone || "",
-        job.work_done_description || "",
+        jobNotes,
         now
       )
       .first();
