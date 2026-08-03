@@ -195,8 +195,15 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
 
     let suppressedReason = null;
     try {
+      // Filter by matching address, not just company -- a client managing
+      // multiple properties (e.g. a property manager) would otherwise have
+      // an open job at ANY of their properties wrongly suppress reminders
+      // for ALL of them. Confirmed live: a client with an open job at
+      // "12/26 Cynthea Teague Crescent" was suppressing a due reminder for
+      // their unrelated "117 Clift Crescent" property.
       const openJobs = await listOpenJobsForCompany(env, tenantId, job.company_uuid);
-      if (Array.isArray(openJobs) && openJobs.length > 0) suppressedReason = "open_pipeline_job";
+      const openJobsAtThisAddress = (openJobs || []).filter((oj) => normalizeStreet(oj.job_address) === addressKey);
+      if (openJobsAtThisAddress.length > 0) suppressedReason = "open_pipeline_job";
     } catch (err) {
       // If the open-jobs check itself fails, don't block the due-candidate
       // row on it -- worst case a customer who's actually already rebooked
