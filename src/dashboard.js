@@ -338,8 +338,6 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .dismiss-btn { background: none; border: 1px solid var(--line-2); border-radius: 8px; width: 30px; height: 30px; line-height: 1; font-size: 17px; color: var(--faint); cursor: pointer; transition: all .13s; }
   .dismiss-btn:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
-  .info-note { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; color: var(--muted); background: #fff8f0; border: 1px solid #fde3c4; border-radius: 9px; padding: 8px 11px; margin-bottom: 12px; line-height: 1.45; }
-  .info-note .ic { color: #d97706; flex: none; margin-top: 1px; }
   .empty-state, #empty-filtered { padding: 52px 24px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; font-size: 14px; line-height: 1.6; box-shadow: var(--sh-sm); max-width: 520px; margin: 0 auto; }
   #empty-filtered { display: none; margin-top: 9px; }
 
@@ -384,7 +382,6 @@ export async function renderDashboardHtml(env, tenantId, token) {
     </select>
   </div>
 </div>
-<div class="info-note"><svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg><span>Texts sent from this add-on may show as &ldquo;Pending&rdquo; in ServiceM8&rsquo;s diary even after they deliver &mdash; ServiceM8&rsquo;s add-on messaging reports delivery status differently from its native SMS. It&rsquo;s not a failed send; the message still goes out from your business number.</span></div>
 ${
   rows
     ? `<div class="table-wrap"><table id="due-table">
