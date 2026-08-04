@@ -569,22 +569,26 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
   // went out functionally; don't leave a draft stuck as "failed" (and
   // re-sendable) for something the customer already received.
   try {
+    let result;
     if (draft.channel === "sms") {
-      await sendPlatformSms(env, tenantId, {
+      result = await sendPlatformSms(env, tenantId, {
         to: dueCustomer.contact_phone_cache,
         message: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });
     } else {
-      await sendPlatformEmail(env, tenantId, {
+      result = await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
         subject: draft.draft_subject || "Time for your next pest treatment",
         textBody: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });
     }
-    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
-      .bind(body, Date.now(), Date.now(), draftId)
+    // Store the ServiceM8 messageID returned by the Messaging API, for
+    // diagnostics/audit (matching an add-on send to a Job Diary entry).
+    const messageId = (result && (result.messageID || result.messageUUID)) || null;
+    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ? WHERE id = ?")
+      .bind(body, Date.now(), Date.now(), messageId, draftId)
       .run();
     await advanceReminderRound(env, draft.due_customer_id, draft.round);
   } catch (err) {
