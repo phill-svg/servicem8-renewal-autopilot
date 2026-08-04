@@ -384,7 +384,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
     </select>
   </div>
 </div>
-<div class="info-note"><svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg><span>Some sent texts may show as &ldquo;Pending&rdquo; in ServiceM8 &mdash; that&rsquo;s a carrier receipt limitation for branded SMS, not a failed send. The message still delivers.</span></div>
+<div class="info-note"><svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg><span>Texts sent from this add-on may show as &ldquo;Pending&rdquo; in ServiceM8&rsquo;s diary even after they deliver &mdash; ServiceM8&rsquo;s add-on messaging reports delivery status differently from its native SMS. It&rsquo;s not a failed send; the message still goes out from your business number.</span></div>
 ${
   rows
     ? `<div class="table-wrap"><table id="due-table">
