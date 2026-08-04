@@ -374,6 +374,27 @@ export async function sendPlatformSms(env, tenantId, { to, message, regardingJob
   });
 }
 
+// Diagnostic: same send but returns the raw HTTP status + parsed body
+// (errorCode / messageID / etc) instead of throwing, so we can inspect
+// exactly what ServiceM8's Messaging API returns for a given send.
+export async function sendPlatformSmsRaw(env, tenantId, { to, message, regardingJobUuid }) {
+  const token = await getValidAccessToken(env, tenantId);
+  const payload = { to: toE164Au(to), message, ...(regardingJobUuid ? { regardingJobUUID: regardingJobUuid } : {}) };
+  const res = await fetch(`${PLATFORM_BASE}/platform_service_sms`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = text;
+  }
+  return { status: res.status, ok: res.ok, sentTo: payload.to, body };
+}
+
 export async function sendPlatformEmail(env, tenantId, { to, subject, htmlBody, textBody, regardingJobUuid }) {
   return platformPostJson(env, tenantId, `/platform_service_email`, {
     to,

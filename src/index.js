@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet, getVendorName } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -554,6 +554,27 @@ async function handleDebugDueCustomers(request, env) {
   return json({ dueCustomers: results || [] });
 }
 
+// Admin-gated SMS probe -- sends a real test SMS and returns the raw
+// ServiceM8 Messaging API response (HTTP status, errorCode, messageID).
+async function handleDebugSmsProbe(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  const to = url.searchParams.get("to");
+  const jobUuid = url.searchParams.get("job");
+  if (!tenantId || !to) return json({ error: "?tenant= and ?to= required" }, { status: 400 });
+  try {
+    const result = await sendPlatformSmsRaw(env, tenantId, {
+      to,
+      message: "Renewal Autopilot SMS probe -- diagnostic test, please ignore.",
+      regardingJobUuid: jobUuid || undefined,
+    });
+    return json(result);
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 // Admin-gated raw ServiceM8 GET passthrough, for diagnosing data issues.
 async function handleDebugRaw(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
@@ -597,6 +618,7 @@ export default {
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
+    if (pathname === "/debug/sms-probe" && method === "POST") return handleDebugSmsProbe(request, env);
 
     if (pathname === "/") {
       return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
