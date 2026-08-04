@@ -179,7 +179,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
       const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
-      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" style="--accent:${s.accent};--rowbg:${s.bg};">
+      const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
+      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" style="--accent:${s.accent};--rowbg:${s.bg};">
         <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -264,8 +265,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .contacted-dd { align-self: center; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--sh-sm); transition: all .14s; }
   .contacted-dd:hover { border-color: #cbd5e1; color: var(--ink-2); }
   .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #fef2f2; box-shadow: 0 0 0 3px rgba(220,38,38,.1); }
-  .filter { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .filter { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .filter label { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+  .search-wrap { position: relative; display: inline-flex; align-items: center; }
+  .search-ic { position: absolute; left: 11px; color: var(--faint); pointer-events: none; }
+  #search-box { padding: 8px 12px 8px 32px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; color: var(--ink); background: var(--surface); box-shadow: var(--sh-sm); width: 240px; max-width: 60vw; }
+  #search-box:hover { border-color: #cbd5e1; }
+  #search-box:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(220,38,38,.12); }
   #service-filter { padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 500; color: var(--ink-2); background: var(--surface); box-shadow: var(--sh-sm); cursor: pointer; }
   #service-filter:hover { border-color: #cbd5e1; }
 
@@ -332,6 +338,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .dismiss-btn { background: none; border: 1px solid var(--line-2); border-radius: 8px; width: 30px; height: 30px; line-height: 1; font-size: 17px; color: var(--faint); cursor: pointer; transition: all .13s; }
   .dismiss-btn:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
+  .info-note { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; color: var(--muted); background: #fff8f0; border: 1px solid #fde3c4; border-radius: 9px; padding: 8px 11px; margin-bottom: 12px; line-height: 1.45; }
+  .info-note .ic { color: #d97706; flex: none; margin-top: 1px; }
   .empty-state, #empty-filtered { padding: 52px 24px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; font-size: 14px; line-height: 1.6; box-shadow: var(--sh-sm); max-width: 520px; margin: 0 auto; }
   #empty-filtered { display: none; margin-top: 9px; }
 
@@ -365,6 +373,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
     <option value="contacted3">Contacted 3 (${counts.contacted3})</option>
   </select>
   <div class="filter">
+    <div class="search-wrap">
+      <svg class="ic search-ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search-box" type="search" placeholder="Search name, address or phone" autocomplete="off" />
+    </div>
     <label for="service-filter">Service</label>
     <select id="service-filter">
       <option value="">All services (${(dueCustomers || []).length})</option>
@@ -372,6 +384,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
     </select>
   </div>
 </div>
+<div class="info-note"><svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg><span>Some sent texts may show as &ldquo;Pending&rdquo; in ServiceM8 &mdash; that&rsquo;s a carrier receipt limitation for branded SMS, not a failed send. The message still delivers.</span></div>
 ${
   rows
     ? `<div class="table-wrap"><table id="due-table">
@@ -390,19 +403,33 @@ ${
   activeBucket = activeBucket ? activeBucket.tabBucket : 'overdue';
 
   var emptyFiltered = document.getElementById('empty-filtered');
+  var searchBox = document.getElementById('search-box');
 
   function applyFilters() {
     var serviceValue = filterSelect.value;
+    var q = (searchBox.value || '').trim().toLowerCase();
     var visibleCount = 0;
     allRows.forEach(function (row) {
-      var match = row.dataset.bucket === activeBucket && (!serviceValue || row.dataset.service === serviceValue);
+      // While searching, look across ALL buckets/tabs so a name can be found
+      // wherever the customer sits; otherwise filter by the active tab.
+      var bucketMatch = q ? true : row.dataset.bucket === activeBucket;
+      var serviceMatch = !serviceValue || row.dataset.service === serviceValue;
+      var searchMatch = !q || (row.dataset.name || '').indexOf(q) !== -1;
+      var match = bucketMatch && serviceMatch && searchMatch;
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
-    var noun = activeBucket.indexOf('contacted') === 0 ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
-    document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' \\u2014 ' + serviceValue : '');
+    var noun;
+    if (q) {
+      noun = visibleCount === 1 ? ' match for \\u201c' + q + '\\u201d' : ' matches for \\u201c' + q + '\\u201d';
+      document.getElementById('sub-count').textContent = visibleCount + noun;
+    } else {
+      noun = activeBucket.indexOf('contacted') === 0 ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
+      document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' \\u2014 ' + serviceValue : '');
+    }
     if (emptyFiltered) emptyFiltered.style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
   }
+  searchBox.addEventListener('input', applyFilters);
 
   var contactedSelect = document.getElementById('contacted-select');
 
