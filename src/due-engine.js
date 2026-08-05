@@ -91,15 +91,14 @@ function addDays(date, days) {
 function daysBetween(a, b) {
   return Math.floor((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
 }
-function isSameCalendarMonth(a, b) {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
-}
 
 // "Due now" starts either once the exact due date has passed (up to
 // overdueGraceDays later, before flipping to "overdue"), OR as soon as the
-// due date falls within the current calendar month even if the exact day
-// hasn't arrived yet -- confirmed with the user: a renewal due Aug 28 should
-// show as "due now" for all of August, not wait until the 28th.
+// due date falls within the next 1 month from today, even if the exact day
+// hasn't arrived yet -- a rolling window (today .. today+1 month), not tied
+// to calendar-month boundaries, so a renewal due early next month shows as
+// "due now" the same way one due late next month would once it's within a
+// month out.
 function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays, dueLaterLeadDays) {
   const daysPastDue = daysBetween(dueDate, today);
 
@@ -109,7 +108,7 @@ function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMax
 
   if (daysPastDue >= overdueGraceDays) return "overdue";
   if (daysPastDue >= 0) return "due";
-  if (isSameCalendarMonth(today, dueDate)) return "due";
+  if (dueDate <= addMonths(today, 1)) return "due";
 
   const dueSoonStart = addDays(dueDate, -dueSoonLeadDays);
   if (today >= dueSoonStart) return "due_soon";

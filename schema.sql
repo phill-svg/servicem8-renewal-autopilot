@@ -47,12 +47,12 @@ CREATE TABLE IF NOT EXISTS category_config (
   servicem8_badge_uuid     TEXT, -- set when signal_type = 'badge'
   category_name_cache      TEXT, -- display label regardless of signal_type
   interval_months          INTEGER NOT NULL,
-  due_soon_lead_days       INTEGER NOT NULL DEFAULT 30,
+  due_soon_lead_days       INTEGER NOT NULL DEFAULT 60,
   due_later_lead_days      INTEGER,       -- extends the lookahead past due_soon_lead_days into a separate
                                           -- "Due later" bucket (e.g. due_soon=60, due_later=90 -> the 3rd
                                           -- month out is "Due later", not lumped into "Due soon"). NULL = no
                                           -- Due later bucket for this rule.
-  overdue_grace_days       INTEGER NOT NULL DEFAULT 14,
+  overdue_grace_days       INTEGER NOT NULL DEFAULT 60,
   overdue_max_days         INTEGER,       -- stop surfacing once overdue by more than this (NULL = no cap)
   is_tracked               INTEGER NOT NULL DEFAULT 1
 );
