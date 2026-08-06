@@ -269,12 +269,13 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     const row = await env.DB.prepare(
       `INSERT INTO due_customers (
          id, tenant_id, category_config_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
-         last_job_uuid, last_completed_at, bucket, suppressed_reason, dismissed_at,
+         last_job_uuid, last_job_number, last_completed_at, bucket, suppressed_reason, dismissed_at,
          contact_name_cache, contact_email_cache, contact_phone_cache, last_job_notes_cache, computed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
        ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, category_config_id) DO UPDATE SET
          servicem8_category_uuid = excluded.servicem8_category_uuid,
          last_job_uuid = excluded.last_job_uuid,
+         last_job_number = CASE WHEN excluded.last_job_number IS NOT NULL THEN excluded.last_job_number ELSE due_customers.last_job_number END,
          last_completed_at = excluded.last_completed_at,
          bucket = excluded.bucket,
          suppressed_reason = excluded.suppressed_reason,
@@ -301,6 +302,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
         job.job_address || "",
         job.category_uuid || null,
         job.uuid,
+        job.generated_job_id || null,
         job.completion_date,
         bucket,
         suppressedReason,

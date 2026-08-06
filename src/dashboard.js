@@ -21,11 +21,23 @@ function telHref(p) {
   return "tel:" + String(p || "").replace(/[^0-9+]/g, "");
 }
 
+// Deep link into the ServiceM8 web app's job card -- same /openjob/<uuid>
+// form the TCB site already uses. Labelled with generated_job_id (the "Job
+// #87" number staff recognise) when we have it; the uuid alone is enough to
+// build a working link, so rows recomputed before that column existed still
+// get one, just labelled generically until the next recompute fills it in.
+function jobLink(jobUuid, jobNumber) {
+  if (!jobUuid) return "";
+  const label = jobNumber ? `#${jobNumber}` : "Open job";
+  return `<a class="job-chip" href="https://go.servicem8.com/openjob/${escapeHtml(jobUuid)}" target="_blank" rel="noopener" title="Open this job in ServiceM8 to see all notes, photos and forms">${IC_EXTERNAL}${escapeHtml(label)}</a>`;
+}
+
 // Inline (self-contained, CSP-safe) Feather-style icons -- currentColor so
 // they inherit the surrounding text colour.
 const IC_PHONE = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
 const IC_CAL = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
 const IC_SEND = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
+const IC_EXTERNAL = `<svg class="ic" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
 
 // ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
 // here (AU format), not the time-of-day the job happened to be closed out.
@@ -211,6 +223,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
         <td class="c-service"><span class="svc-tag">${escapeHtml(r.service_name || "Unknown")}</span></td>
         <td class="c-date">
           <span class="date-val">${IC_CAL}${escapeHtml(formatDateOnly(r.last_completed_at))}</span>
+          ${jobLink(r.last_job_uuid, r.last_job_number)}
           ${
             r.last_job_notes_cache
               ? `<details class="job-notes">
@@ -321,6 +334,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .due-date { display: block; font-size: 12.5px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
   .due-date.muted { color: var(--faint); font-weight: 500; }
   .due-chip { display: inline-block; margin-top: 4px; font-size: 10.5px; font-weight: 750; letter-spacing: .02em; text-transform: uppercase; border-radius: 6px; padding: 2px 7px; }
+  .job-chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; font-size: 11px; font-weight: 700; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 8px; text-decoration: none; font-variant-numeric: tabular-nums; transition: all .12s; }
+  .job-chip:hover { color: var(--brand-ink); background: #fef2f2; border-color: #fecaca; }
+  .job-chip .ic { color: var(--faint); }
+  .job-chip:hover .ic { color: var(--brand); }
   .job-notes { margin-top: 6px; }
   .job-notes summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
   .job-notes summary:hover { color: var(--ink-2); }

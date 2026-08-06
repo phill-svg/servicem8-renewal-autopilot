@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS due_customers (
   address_display          TEXT,
   servicem8_category_uuid  TEXT, -- cached: the triggering job's real category, for display only
   last_job_uuid            TEXT,
+  last_job_number          TEXT,          -- job.generated_job_id -- the "Job #87" number staff see; labels the dashboard's deep link to the job (migration 004)
   last_completed_at        TEXT,
   bucket                   TEXT NOT NULL, -- due_later | due_soon | due | overdue
   suppressed_reason        TEXT,          -- NULL | open_pipeline_job | category_untracked
