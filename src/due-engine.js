@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -473,4 +473,98 @@ export async function recomputeAllCategoriesForTenant(env, tenantId) {
     await upsertJobsAsDueCandidates(env, tenantId, rule, jobs || []);
   }
   return { jobsScanned };
+}
+
+// ---- SMS delivery verification -------------------------------------------
+//
+// A 2xx from the Messaging API only means ServiceM8 accepted the request;
+// delivery can still fail afterwards (job diary shows "Delivery Failed") with
+// nothing surfaced to the API caller. The only reliable signal found
+// (2026-08-07, live against three silently-failed sends): a delivered SMS
+// appears in the job's sms.json history, a failed one never does. So this
+// sweep re-checks every "sent" SMS draft once it's had time to land.
+
+const DELIVERY_CHECK_MIN_AGE_MS = 10 * 60_000; // give ServiceM8 time to write the record
+const DELIVERY_CHECK_MAX_AGE_MS = 14 * 24 * 3600_000; // don't churn ancient rows forever
+
+// sms.json stores the message as sent; compare whitespace-normalized so an
+// invisible formatting difference can't produce a false "failed".
+function normalizeSmsText(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+export async function verifySmsDeliveriesForTenant(env, tenantId) {
+  const now = Date.now();
+  const { results: drafts } = await env.DB.prepare(
+    `SELECT rd.*, dc.last_job_uuid FROM reminder_drafts rd
+     JOIN due_customers dc ON dc.id = rd.due_customer_id
+     WHERE rd.tenant_id = ? AND rd.channel = 'sms' AND rd.status = 'sent'
+       AND rd.delivery_status IS NULL AND rd.sent_at IS NOT NULL
+       AND rd.sent_at <= ? AND rd.sent_at >= ?`
+  )
+    .bind(tenantId, now - DELIVERY_CHECK_MIN_AGE_MS, now - DELIVERY_CHECK_MAX_AGE_MS)
+    .all();
+  if (!drafts || !drafts.length) return;
+
+  // One sms.json fetch per job, not per draft.
+  const smsByJob = new Map();
+  for (const draft of drafts) {
+    if (!draft.last_job_uuid) continue;
+    let records = smsByJob.get(draft.last_job_uuid);
+    if (records === undefined) {
+      try {
+        records = (await listJobSmsRecords(env, tenantId, draft.last_job_uuid)) || [];
+      } catch (err) {
+        const message = String(err && err.message);
+        // Tenant authorized before the read_sms scope existed -- verification
+        // is impossible until they re-connect. Leave delivery_status NULL so
+        // these drafts are re-checked automatically once the scope arrives;
+        // never mark failed on a scope error.
+        if (message.includes("read_sms")) {
+          console.error(`sms delivery verification skipped for tenant ${tenantId}: token lacks read_sms scope (re-connect required)`);
+          return;
+        }
+        console.error(`sms delivery verification: sms.json fetch failed for job ${draft.last_job_uuid}`, err);
+        records = null; // transient -- retry this job next sweep
+      }
+      smsByJob.set(draft.last_job_uuid, records);
+    }
+    if (records === null) continue;
+
+    const wanted = normalizeSmsText(draft.draft_body);
+    const found = records.some((r) => r.direction === "outbound" && normalizeSmsText(r.message) === wanted);
+    if (found) {
+      await env.DB.prepare("UPDATE reminder_drafts SET delivery_status = 'confirmed', delivery_checked_at = ? WHERE id = ?")
+        .bind(now, draft.id)
+        .run();
+      continue;
+    }
+
+    // Absent after the grace window = delivery failed. Flip the draft back to
+    // a re-sendable failed state and roll the customer's reminder_round back
+    // so they return to their urgency bucket in the dashboard instead of
+    // sitting in "Contacted" as if the message went out.
+    console.error(`sms delivery FAILED for draft ${draft.id} (tenant ${tenantId}, job ${draft.last_job_uuid}): message never appeared in job SMS history`);
+    await env.DB.prepare(
+      "UPDATE reminder_drafts SET status = 'failed', delivery_status = 'failed', delivery_checked_at = ?, error = ? WHERE id = ?"
+    )
+      .bind(now, "Delivery failed: SMS never appeared in the job's SMS history (ServiceM8 accepted the send but did not deliver it)", draft.id)
+      .run();
+    await env.DB.prepare(
+      "UPDATE due_customers SET reminder_round = CASE WHEN reminder_round > ? THEN ? ELSE reminder_round END WHERE id = ?"
+    )
+      .bind(draft.round, draft.round, draft.due_customer_id)
+      .run();
+  }
+}
+
+export async function verifySmsDeliveries(env) {
+  const { results: tenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
+  for (const tenant of tenants || []) {
+    try {
+      await verifySmsDeliveriesForTenant(env, tenant.servicem8_account_uuid);
+    } catch (err) {
+      console.error(`sms delivery verification failed for tenant ${tenant.servicem8_account_uuid}`, err);
+    }
+  }
 }

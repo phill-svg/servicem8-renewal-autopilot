@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
   sent_at                  INTEGER,
   servicem8_message_uuid   TEXT,
   error                    TEXT,
+  -- Async delivery verification (migration 002): NULL = unchecked, 'confirmed'
+  -- = the sent SMS showed up in the job's sms.json history, 'failed' = absent
+  -- after the grace window -- ServiceM8's 2xx send response alone does NOT
+  -- prove delivery (see verifySmsDeliveries in src/due-engine.js).
+  delivery_status          TEXT,
+  delivery_checked_at      INTEGER,
   created_at               INTEGER NOT NULL,
   UNIQUE(due_customer_id, channel, round)
 );

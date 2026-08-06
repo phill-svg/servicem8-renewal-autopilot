@@ -366,12 +366,34 @@ export async function registerWebhook(env, tenantId, { event, callbackUrl }) {
 // docs, sends through the tenant's OWN ServiceM8 account (their SMS
 // credits/sender ID), no separate SMS provider needed.
 
+// HTTP 200 from the Messaging API does NOT mean the send succeeded. Confirmed
+// live (2026-08-07): sends that never reached the customer still returned 2xx
+// but with no messageID in the body -- the docs' success shape is errorCode 0
+// plus a messageID, and every delivered send had one while every silent
+// failure didn't. So a 200 body without a messageID is treated as a failure
+// here, with the raw body preserved in the error for the audit trail.
 export async function sendPlatformSms(env, tenantId, { to, message, regardingJobUuid }) {
-  return platformPostJson(env, tenantId, `/platform_service_sms`, {
+  const result = await platformPostJson(env, tenantId, `/platform_service_sms`, {
     to: toE164Au(to),
     message,
     ...(regardingJobUuid ? { regardingJobUUID: regardingJobUuid } : {}),
   });
+  const errorCode = result && typeof result.errorCode === "number" ? result.errorCode : null;
+  const messageId = result && (result.messageID || result.messageUUID);
+  if ((errorCode !== null && errorCode !== 0) || !messageId) {
+    throw new Error(`ServiceM8 SMS send not accepted (HTTP 200 but no messageID): ${JSON.stringify(result)}`);
+  }
+  return result;
+}
+
+// Job SMS history (api_1.0/sms.json, needs the read_sms scope). Delivered
+// messages -- including Messaging API sends -- show up here; failed ones
+// never do, which is the only delivery signal ServiceM8 exposes (the sms
+// record has no status field, and the Job Diary's "Delivery Failed" state
+// isn't in any public object). Only some filter fields are accepted:
+// related_object_uuid works, timestamp/to_phone are rejected.
+export async function listJobSmsRecords(env, tenantId, jobUuid) {
+  return sm8Fetch(env, tenantId, `/sms.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
 }
 
 // Diagnostic: same send but returns the raw HTTP status + parsed body
@@ -396,11 +418,18 @@ export async function sendPlatformSmsRaw(env, tenantId, { to, message, regarding
 }
 
 export async function sendPlatformEmail(env, tenantId, { to, subject, htmlBody, textBody, regardingJobUuid }) {
-  return platformPostJson(env, tenantId, `/platform_service_email`, {
+  const result = await platformPostJson(env, tenantId, `/platform_service_email`, {
     to,
     subject,
     ...(htmlBody ? { htmlBody } : {}),
     ...(textBody ? { textBody } : {}),
     ...(regardingJobUuid ? { regardingJobUUID: regardingJobUuid } : {}),
   });
+  // Same 200-with-error-body trap as SMS. No live evidence yet of what a
+  // failed email response looks like, so only reject on an explicit non-zero
+  // errorCode rather than also requiring a messageID.
+  if (result && typeof result.errorCode === "number" && result.errorCode !== 0) {
+    throw new Error(`ServiceM8 email send not accepted: ${JSON.stringify(result)}`);
+  }
+  return result;
 }

@@ -116,10 +116,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const roundDrafts = drafts.filter((d) => (d.round || 1) === currentRound);
       const smsDraft = roundDrafts.find((d) => d.channel === "sms");
       const emailDraft = roundDrafts.find((d) => d.channel === "email");
-      const pendingChannels = [
-        smsDraft && smsDraft.status === "pending" ? "sms" : null,
-        emailDraft && emailDraft.status === "pending" ? "email" : null,
-      ].filter(Boolean);
+      // 'failed' counts as actionable alongside 'pending': it's either a send
+      // error or the delivery-verification sweep catching a silent delivery
+      // failure -- both mean the customer still hasn't been reached, so the
+      // row must stay in (or return to) its urgency bucket for a re-send.
+      const actionable = (d) => d && (d.status === "pending" || d.status === "failed");
+      const pendingChannels = [actionable(smsDraft) ? "sms" : null, actionable(emailDraft) ? "email" : null].filter(Boolean);
+      const failedDrafts = roundDrafts.filter((d) => d.status === "failed");
       const everSent = drafts.some((d) => d.status === "sent");
       // For the "sent" chip: whichever channel(s) went out in the most recently
       // completed round.
@@ -132,8 +135,16 @@ export async function renderDashboardHtml(env, tenantId, token) {
       // channel hasn't gone out yet, staff can still send it from here.
       const pendById = {};
       for (const d of drafts) if (d.status === "pending" && !pendById[d.channel]) pendById[d.channel] = d;
+      // Failed drafts are offered for re-send too (a still-pending draft for
+      // the same channel wins, being the newer round).
+      for (const d of drafts) if (d.status === "failed" && !pendById[d.channel]) pendById[d.channel] = d;
       const composerChannels = ["sms", "email"].filter((ch) => pendById[ch]);
 
+      // Rendered OUTSIDE the collapsed composer so a failure is visible
+      // without expanding anything.
+      const failedNote = failedDrafts.length
+        ? `<div class="sent-row">${failedDrafts.map((d) => `<span class="failed-chip" title="${escapeHtml(d.error || "Send failed")}">&#10007; ${escapeHtml(d.channel.toUpperCase())} delivery failed &mdash; resend</span>`).join("")}</div>`
+        : "";
       const sentNote = sentChannels.length
         ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
         : "";
@@ -141,7 +152,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
       let draftHtml;
       if (!composerChannels.length) {
         // Nothing left to send -- just show what's gone out (or nothing yet).
-        draftHtml = sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`);
+        draftHtml = failedNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
       } else {
         const bodyAttrs = composerChannels
           .map((ch) => `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}"`)
@@ -149,7 +160,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
         // Composer is collapsed by default (native <details>) so the list
         // stays dense -- staff click "Review & send" to expand it inline.
         const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
-        draftHtml = `<details class="draft-wrap">
+        draftHtml = `${failedNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
@@ -313,6 +324,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .sent-chip { font-size: 11px; font-weight: 700; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .failed-chip { font-size: 11px; font-weight: 700; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
@@ -552,7 +564,9 @@ async function advanceReminderRound(env, dueCustomerId, sentRound) {
 export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
   const draft = await env.DB.prepare("SELECT * FROM reminder_drafts WHERE id = ? AND tenant_id = ?").bind(draftId, tenantId).first();
   if (!draft) throw new Error("draft not found for this tenant");
-  if (draft.status !== "pending") return; // already actioned -- idempotent
+  // 'failed' is re-sendable: covers both an immediate send error and the
+  // delivery-verification sweep flipping a false "sent" back to failed.
+  if (draft.status !== "pending" && draft.status !== "failed") return; // already actioned -- idempotent
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
@@ -584,14 +598,20 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     // Store the ServiceM8 messageID returned by the Messaging API, for
     // diagnostics/audit (matching an add-on send to a Job Diary entry).
     const messageId = (result && (result.messageID || result.messageUUID)) || null;
-    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ? WHERE id = ?")
+    // delivery_status resets to NULL so the verification sweep re-checks this
+    // send even when it's a retry of a previously failed draft.
+    await env.DB.prepare(
+      "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL WHERE id = ?"
+    )
       .bind(body, Date.now(), Date.now(), messageId, draftId)
       .run();
     await advanceReminderRound(env, draft.due_customer_id, draft.round);
   } catch (err) {
     const message = String(err && err.message);
     if (message.includes("has already been sent")) {
-      await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
+      await env.DB.prepare(
+        "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL WHERE id = ?"
+      )
         .bind(body, Date.now(), Date.now(), draftId)
         .run();
       await advanceReminderRound(env, draft.due_customer_id, draft.round);

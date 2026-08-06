@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifySmsDeliveries } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -267,6 +267,11 @@ async function runBackfillAndRefreshSweep(env) {
       console.error(`proactive token refresh failed for tenant ${row.tenant_id}`, err);
     }
   }
+
+  // Verify recently-"sent" SMS drafts actually got delivered -- ServiceM8's
+  // 2xx send response alone doesn't prove that (see verifySmsDeliveries).
+  // Cheap in steady state: one D1 query per tenant unless unverified sends exist.
+  await verifySmsDeliveries(env);
 }
 
 // ---- ServiceM8 Add-on: job-card button -> standalone dashboard -----------
