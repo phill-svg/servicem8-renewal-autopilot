@@ -16,12 +16,13 @@ const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
 // read_customers -- confirmed via a live 403 ("read_customer_contacts scope
 // required") on /companycontact.json, which is where phone/email actually
 // live (the Company record itself has neither).
-// read_sms: needed to verify SMS delivery after sending -- a delivered
-// Messaging-API SMS appears in the job's sms.json history, a failed one never
-// does (confirmed live 2026-08-07 against 3 silently-failed sends). Tenants
-// authorized before this scope was added must re-connect before delivery
-// verification can run; the sweep degrades gracefully until then.
-export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email read_sms read_job_notes vendor";
+// read_sms / read_email: needed to verify delivery after sending. A delivered
+// Messaging-API SMS appears in the job's sms.json history and a failed one
+// never does (confirmed live 2026-08-07 against 3 silently-failed sends);
+// email.json is better still -- it carries explicit `bounced` and `opened`
+// flags. Tenants authorized before these scopes were added must re-connect
+// before verification can run; the sweep degrades gracefully until then.
+export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email read_sms read_email read_job_notes vendor";
 
 export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   const url = new URL(AUTHORIZE_URL);

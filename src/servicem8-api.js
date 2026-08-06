@@ -396,6 +396,16 @@ export async function listJobSmsRecords(env, tenantId, jobUuid) {
   return sm8Fetch(env, tenantId, `/sms.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
 }
 
+// Job email history (api_1.0/email.json, needs the read_email scope). Unlike
+// sms.json this carries explicit delivery signal -- `bounced` for hard
+// failures and `opened`/`first_opened_at` for read receipts (the same data
+// behind the job diary's "Email opened at ..." line). message_text comes back
+// byte-identical to the textBody we sent, so drafts match on body exactly as
+// they do for SMS.
+export async function listJobEmailRecords(env, tenantId, jobUuid) {
+  return sm8Fetch(env, tenantId, `/email.json?${odataFilter(`related_object_uuid eq '${jobUuid}'`)}`);
+}
+
 // Diagnostic: same send but returns the raw HTTP status + parsed body
 // (errorCode / messageID / etc) instead of throwing, so we can inspect
 // exactly what ServiceM8's Messaging API returns for a given send.

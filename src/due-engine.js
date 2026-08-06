@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords, listJobEmailRecords } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -475,22 +475,56 @@ export async function recomputeAllCategoriesForTenant(env, tenantId) {
   return { jobsScanned };
 }
 
-// ---- SMS delivery verification -------------------------------------------
+// ---- delivery verification ------------------------------------------------
 //
 // A 2xx from the Messaging API only means ServiceM8 accepted the request;
 // delivery can still fail afterwards (job diary shows "Delivery Failed") with
-// nothing surfaced to the API caller. The only reliable signal found
-// (2026-08-07, live against three silently-failed sends): a delivered SMS
-// appears in the job's sms.json history, a failed one never does. So this
-// sweep re-checks every "sent" SMS draft once it's had time to land.
+// nothing surfaced to the API caller. Per channel:
+//
+//   SMS   -- sms.json has no status field at all, so delivery is inferred
+//            from presence: a delivered SMS appears in the job's history, a
+//            failed one never does (confirmed live 2026-08-07 against three
+//            silently-failed sends).
+//   Email -- email.json is explicit: `bounced` marks a hard failure and
+//            `opened`/`first_opened_at` give a read receipt, so absence is
+//            only the fallback signal.
 
 const DELIVERY_CHECK_MIN_AGE_MS = 10 * 60_000; // give ServiceM8 time to write the record
 const DELIVERY_CHECK_MAX_AGE_MS = 14 * 24 * 3600_000; // don't churn ancient rows forever
+// Opens can land days after delivery, so confirmed-but-unopened emails are
+// re-polled -- but only this often, or the 2-minute sweep would hammer the
+// API for a fortnight per email.
+const OPEN_POLL_INTERVAL_MS = 6 * 3600_000;
 
-// sms.json stores the message as sent; compare whitespace-normalized so an
-// invisible formatting difference can't produce a false "failed".
+// Both sms.json's `message` and email.json's `message_text` come back as the
+// exact text we sent; compare whitespace-normalized anyway so an invisible
+// formatting difference can't produce a false "failed".
 function normalizeSmsText(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+// A tenant authorized before these scopes existed can't be verified at all
+// until they re-connect. Detected by the scope name in ServiceM8's 403 so the
+// sweep can skip quietly instead of marking everything failed.
+function isMissingScopeError(err, scope) {
+  return String(err && err.message).includes(scope);
+}
+
+// Shared by both channels: flip the draft to a re-sendable failed state and
+// roll the customer's reminder_round back so they return to their urgency
+// bucket in the dashboard instead of sitting in "Contacted" as if the message
+// went out.
+async function markDeliveryFailed(env, draft, reason) {
+  await env.DB.prepare(
+    "UPDATE reminder_drafts SET status = 'failed', delivery_status = 'failed', delivery_checked_at = ?, error = ? WHERE id = ?"
+  )
+    .bind(Date.now(), reason, draft.id)
+    .run();
+  await env.DB.prepare(
+    "UPDATE due_customers SET reminder_round = CASE WHEN reminder_round > ? THEN ? ELSE reminder_round END WHERE id = ?"
+  )
+    .bind(draft.round, draft.round, draft.due_customer_id)
+    .run();
 }
 
 export async function verifySmsDeliveriesForTenant(env, tenantId) {
@@ -520,7 +554,7 @@ export async function verifySmsDeliveriesForTenant(env, tenantId) {
         // is impossible until they re-connect. Leave delivery_status NULL so
         // these drafts are re-checked automatically once the scope arrives;
         // never mark failed on a scope error.
-        if (message.includes("read_sms")) {
+        if (isMissingScopeError(err, "read_sms")) {
           console.error(`sms delivery verification skipped for tenant ${tenantId}: token lacks read_sms scope (re-connect required)`);
           return;
         }
@@ -540,31 +574,100 @@ export async function verifySmsDeliveriesForTenant(env, tenantId) {
       continue;
     }
 
-    // Absent after the grace window = delivery failed. Flip the draft back to
-    // a re-sendable failed state and roll the customer's reminder_round back
-    // so they return to their urgency bucket in the dashboard instead of
-    // sitting in "Contacted" as if the message went out.
+    // Absent after the grace window = delivery failed.
     console.error(`sms delivery FAILED for draft ${draft.id} (tenant ${tenantId}, job ${draft.last_job_uuid}): message never appeared in job SMS history`);
-    await env.DB.prepare(
-      "UPDATE reminder_drafts SET status = 'failed', delivery_status = 'failed', delivery_checked_at = ?, error = ? WHERE id = ?"
-    )
-      .bind(now, "Delivery failed: SMS never appeared in the job's SMS history (ServiceM8 accepted the send but did not deliver it)", draft.id)
-      .run();
-    await env.DB.prepare(
-      "UPDATE due_customers SET reminder_round = CASE WHEN reminder_round > ? THEN ? ELSE reminder_round END WHERE id = ?"
-    )
-      .bind(draft.round, draft.round, draft.due_customer_id)
-      .run();
+    await markDeliveryFailed(
+      env,
+      draft,
+      "Delivery failed: SMS never appeared in the job's SMS history (ServiceM8 accepted the send but did not deliver it)"
+    );
   }
 }
 
-export async function verifySmsDeliveries(env) {
+// Email verification, plus read receipts. Unlike SMS this has real delivery
+// signal, so absence is only the last resort: an explicit `bounced` record
+// fails immediately, and a found record confirms delivery and carries the
+// open timestamp. Confirmed-but-unopened emails keep getting re-polled (at
+// OPEN_POLL_INTERVAL_MS) because an open can land days after delivery.
+export async function verifyEmailDeliveriesForTenant(env, tenantId) {
+  const now = Date.now();
+  const { results: drafts } = await env.DB.prepare(
+    `SELECT rd.*, dc.last_job_uuid FROM reminder_drafts rd
+     JOIN due_customers dc ON dc.id = rd.due_customer_id
+     WHERE rd.tenant_id = ? AND rd.channel = 'email' AND rd.status = 'sent'
+       AND rd.sent_at IS NOT NULL AND rd.sent_at <= ? AND rd.sent_at >= ?
+       AND (rd.delivery_status IS NULL
+            OR (rd.delivery_status = 'confirmed' AND rd.opened_at IS NULL
+                AND (rd.delivery_checked_at IS NULL OR rd.delivery_checked_at <= ?)))`
+  )
+    .bind(tenantId, now - DELIVERY_CHECK_MIN_AGE_MS, now - DELIVERY_CHECK_MAX_AGE_MS, now - OPEN_POLL_INTERVAL_MS)
+    .all();
+  if (!drafts || !drafts.length) return;
+
+  const emailsByJob = new Map();
+  for (const draft of drafts) {
+    if (!draft.last_job_uuid) continue;
+    let records = emailsByJob.get(draft.last_job_uuid);
+    if (records === undefined) {
+      try {
+        records = (await listJobEmailRecords(env, tenantId, draft.last_job_uuid)) || [];
+      } catch (err) {
+        if (isMissingScopeError(err, "read_email")) {
+          console.error(`email delivery verification skipped for tenant ${tenantId}: token lacks read_email scope (re-connect required)`);
+          return;
+        }
+        console.error(`email delivery verification: email.json fetch failed for job ${draft.last_job_uuid}`, err);
+        records = null; // transient -- retry this job next sweep
+      }
+      emailsByJob.set(draft.last_job_uuid, records);
+    }
+    if (records === null) continue;
+
+    const wanted = normalizeSmsText(draft.draft_body);
+    const record = records.find((r) => r.direction === "outbound" && normalizeSmsText(r.message_text) === wanted);
+
+    if (record && record.bounced) {
+      console.error(`email BOUNCED for draft ${draft.id} (tenant ${tenantId}, job ${draft.last_job_uuid})`);
+      await markDeliveryFailed(env, draft, "Delivery failed: the email bounced (ServiceM8 reported a hard bounce for this address)");
+      continue;
+    }
+
+    if (record) {
+      await env.DB.prepare("UPDATE reminder_drafts SET delivery_status = 'confirmed', delivery_checked_at = ?, opened_at = ? WHERE id = ?")
+        .bind(now, record.first_opened_at || null, draft.id)
+        .run();
+      continue;
+    }
+
+    // Never appeared. Only meaningful on the first pass -- a draft already
+    // confirmed is just being re-polled for an open, and a transient gap in
+    // the history must not retroactively fail it.
+    if (draft.delivery_status === "confirmed") continue;
+    console.error(`email delivery FAILED for draft ${draft.id} (tenant ${tenantId}, job ${draft.last_job_uuid}): message never appeared in job email history`);
+    await markDeliveryFailed(
+      env,
+      draft,
+      "Delivery failed: email never appeared in the job's email history (ServiceM8 accepted the send but did not deliver it)"
+    );
+  }
+}
+
+// Both channels, all active tenants. One channel's failure never blocks the
+// other, so a tenant that granted read_sms but not read_email still gets SMS
+// verification.
+export async function verifyDeliveries(env) {
   const { results: tenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
   for (const tenant of tenants || []) {
+    const tenantId = tenant.servicem8_account_uuid;
     try {
-      await verifySmsDeliveriesForTenant(env, tenant.servicem8_account_uuid);
+      await verifySmsDeliveriesForTenant(env, tenantId);
     } catch (err) {
-      console.error(`sms delivery verification failed for tenant ${tenant.servicem8_account_uuid}`, err);
+      console.error(`sms delivery verification failed for tenant ${tenantId}`, err);
+    }
+    try {
+      await verifyEmailDeliveriesForTenant(env, tenantId);
+    } catch (err) {
+      console.error(`email delivery verification failed for tenant ${tenantId}`, err);
     }
   }
 }

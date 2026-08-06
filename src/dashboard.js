@@ -145,8 +145,17 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const failedNote = failedDrafts.length
         ? `<div class="sent-row">${failedDrafts.map((d) => `<span class="failed-chip" title="${escapeHtml(d.error || "Send failed")}">&#10007; ${escapeHtml(d.channel.toUpperCase())} delivery failed &mdash; resend</span>`).join("")}</div>`
         : "";
+      // An opened email is the strongest signal we have that a reminder
+      // actually reached a human, so it gets its own green chip rather than
+      // being folded into the generic "sent".
       const sentNote = sentChannels.length
-        ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
+        ? `<div class="sent-row">${sentChannels
+            .map((d) =>
+              d.opened_at
+                ? `<span class="opened-chip" title="Opened ${escapeHtml(d.opened_at)}">&#9993; ${escapeHtml(d.channel.toUpperCase())} opened ${escapeHtml(formatDateOnly(d.opened_at))}</span>`
+                : `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`
+            )
+            .join("")}</div>`
         : "";
 
       let draftHtml;
@@ -325,6 +334,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .sent-chip { font-size: 11px; font-weight: 700; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .failed-chip { font-size: 11px; font-weight: 700; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .opened-chip { font-size: 11px; font-weight: 700; color: #166534; background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
@@ -601,7 +611,7 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     // delivery_status resets to NULL so the verification sweep re-checks this
     // send even when it's a retry of a previously failed draft.
     await env.DB.prepare(
-      "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL WHERE id = ?"
+      "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL, opened_at = NULL WHERE id = ?"
     )
       .bind(body, Date.now(), Date.now(), messageId, draftId)
       .run();
@@ -610,7 +620,7 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     const message = String(err && err.message);
     if (message.includes("has already been sent")) {
       await env.DB.prepare(
-        "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL WHERE id = ?"
+        "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL, opened_at = NULL WHERE id = ?"
       )
         .bind(body, Date.now(), Date.now(), draftId)
         .run();

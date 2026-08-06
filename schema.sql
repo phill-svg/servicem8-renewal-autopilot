@@ -128,6 +128,9 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
   -- prove delivery (see verifySmsDeliveries in src/due-engine.js).
   delivery_status          TEXT,
   delivery_checked_at      INTEGER,
+  -- Email read receipt (migration 003): ServiceM8's account-local datetime
+  -- string from email.json's first_opened_at, or NULL if never opened.
+  opened_at                TEXT,
   created_at               INTEGER NOT NULL,
   UNIQUE(due_customer_id, channel, round)
 );
