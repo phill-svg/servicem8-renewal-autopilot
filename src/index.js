@@ -446,13 +446,16 @@ async function handleDashboard(request, env) {
 }
 
 async function handleDashboardApprove(request, env) {
-  const { token, draftId, editedBody } = await readJson(request);
+  // resend: an explicit staff choice to send a channel again. Without it an
+  // already-sent draft is a no-op, so a double-clicked button still can't
+  // send twice.
+  const { token, draftId, editedBody, resend } = await readJson(request);
   const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
   if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
   if (!draftId) return json({ error: "draftId required" }, { status: 400 });
 
   try {
-    await approveAndSendDraft(env, tenantId, draftId, editedBody);
+    await approveAndSendDraft(env, tenantId, draftId, editedBody, { resend: resend === true });
     return json({ ok: true });
   } catch (err) {
     console.error(`dashboard approve failed for tenant ${tenantId}, draft ${draftId}`, err);

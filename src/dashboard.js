@@ -156,15 +156,25 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const lastSentRound = sentRounds.length ? Math.max(...sentRounds) : 0;
       const sentChannels = drafts.filter((d) => d.status === "sent" && (d.round || 1) === lastSentRound);
 
-      // The composer offers EVERY still-pending draft (any round), deduped to
-      // the newest per channel -- so even in a Contacted view, if the other
-      // channel hasn't gone out yet, staff can still send it from here.
+      // The composer offers EVERY channel this customer can actually be
+      // reached on, every time -- an unsent draft where there is one, else the
+      // last thing sent, offered again as a re-send. Sending is never one
+      // channel OR the other: chase by SMS twice, then email, then SMS again,
+      // in whatever order suits. Drafts are newest-first, so the first match
+      // per channel is the current one.
       const pendById = {};
-      for (const d of drafts) if (d.status === "pending" && !pendById[d.channel]) pendById[d.channel] = d;
-      // Failed drafts are offered for re-send too (a still-pending draft for
-      // the same channel wins, being the newer round).
-      for (const d of drafts) if (d.status === "failed" && !pendById[d.channel]) pendById[d.channel] = d;
-      const composerChannels = ["sms", "email"].filter((ch) => pendById[ch]);
+      const resendById = {};
+      for (const d of drafts) if ((d.status === "pending" || d.status === "failed") && !pendById[d.channel]) pendById[d.channel] = d;
+      for (const d of drafts) {
+        if (d.status === "sent" && !pendById[d.channel]) {
+          pendById[d.channel] = d;
+          resendById[d.channel] = true;
+        }
+      }
+      // Don't offer a channel we know can't deliver: SMS needs a real mobile
+      // (landlines carry the "no SMS" chip), email needs an address.
+      const channelReachable = { sms: isSendableMobile(r.contact_phone_cache), email: !!r.contact_email_cache };
+      const composerChannels = ["sms", "email"].filter((ch) => pendById[ch] && channelReachable[ch]);
 
       // Rendered OUTSIDE the collapsed composer so a failure is visible
       // without expanding anything.
@@ -190,11 +200,15 @@ export async function renderDashboardHtml(env, tenantId, token) {
         draftHtml = failedNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
       } else {
         const bodyAttrs = composerChannels
-          .map((ch) => `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}"`)
+          .map(
+            (ch) =>
+              `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}" data-resend-${ch}="${resendById[ch] ? "1" : "0"}"`
+          )
           .join(" ");
         // Composer is collapsed by default (native <details>) so the list
         // stays dense -- staff click "Review & send" to expand it inline.
         const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
+        const first = composerChannels[0];
         draftHtml = `${failedNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
@@ -204,8 +218,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
                 .join("")}</div>
               <span class="draft-hint">pick a channel &amp; edit before sending</span>
             </div>
-            <textarea class="draft-textarea">${escapeHtml(pendById[composerChannels[0]].draft_body)}</textarea>
-            <button class="approve-btn">${IC_SEND}<span>Send <b class="send-ch">${composerChannels[0].toUpperCase()}</b></span></button>
+            <textarea class="draft-textarea">${escapeHtml(pendById[first].draft_body)}</textarea>
+            <button class="approve-btn"${resendById[first] ? ' data-resending="1"' : ""}>${IC_SEND}<span><b class="send-verb">${resendById[first] ? "Re-send" : "Send"}</b> <b class="send-ch">${first.toUpperCase()}</b></span></button>
             ${sentNote}
           </div>
         </details>`;
@@ -524,9 +538,14 @@ ${
     var editedByChannel = {};
     var current = chanBtns.length ? chanBtns[0].dataset.ch : 'sms';
 
+    var sendVerb = card.querySelector('.send-verb');
+    function isResend(ch) {
+      return card.dataset['resend' + ch.charAt(0).toUpperCase() + ch.slice(1)] === '1';
+    }
     function loadChannel(ch) {
       textarea.value = editedByChannel[ch] !== undefined ? editedByChannel[ch] : (card.dataset['body' + ch.charAt(0).toUpperCase() + ch.slice(1)] || '');
       if (sendCh) sendCh.textContent = ch.toUpperCase();
+      if (sendVerb) sendVerb.textContent = isResend(ch) ? 'Re-send' : 'Send';
     }
     chanBtns.forEach(function (b) {
       b.addEventListener('click', function () {
@@ -542,6 +561,8 @@ ${
     btn.addEventListener('click', async function () {
       var ch = current;
       var draftId = card.dataset['draft' + ch.charAt(0).toUpperCase() + ch.slice(1)];
+      var resending = isResend(ch);
+      if (resending && !confirm('Send this ' + ch.toUpperCase() + ' again? The customer has already had one.')) return;
       btn.disabled = true;
       chanBtns.forEach(function (x) { x.disabled = true; });
       btn.textContent = 'Sending...';
@@ -549,7 +570,7 @@ ${
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value }),
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, resend: resending }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
@@ -611,12 +632,16 @@ async function advanceReminderRound(env, dueCustomerId, sentRound) {
 // before sending -- when present (and non-empty after trimming) it's what
 // actually gets sent, and it's persisted onto the draft row so the record
 // reflects what really went out, not the original auto-generated wording.
-export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
+export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { resend = false } = {}) {
   const draft = await env.DB.prepare("SELECT * FROM reminder_drafts WHERE id = ? AND tenant_id = ?").bind(draftId, tenantId).first();
   if (!draft) throw new Error("draft not found for this tenant");
   // 'failed' is re-sendable: covers both an immediate send error and the
   // delivery-verification sweep flipping a false "sent" back to failed.
-  if (draft.status !== "pending" && draft.status !== "failed") return; // already actioned -- idempotent
+  // An already-'sent' draft only goes again on an explicit resend, so staff
+  // can chase by SMS twice (or email twice, or any mix) without one send
+  // closing off the channel -- while a double-clicked button still can't.
+  const reSendable = draft.status === "pending" || draft.status === "failed" || (resend && draft.status === "sent");
+  if (!reSendable) return; // already actioned -- idempotent
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
