@@ -4,7 +4,7 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories } from "./servicem8-api.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -17,8 +17,22 @@ const STYLE = {
   contacted: { accent: "#64748b", bg: "#f7f8fa", pillBg: "#e2e8f0", pillFg: "#334155", label: "Contacted" },
 };
 
+// Contact fields hold things like "61403232912,0403232912" (two numbers in
+// one field) or "0410414736 husband". Stripping non-digits alone dialled the
+// two numbers concatenated, so this shares the SMS sender's normalizer.
 function telHref(p) {
-  return "tel:" + String(p || "").replace(/[^0-9+]/g, "");
+  return "tel:" + (toE164Au(p) || String(p || "").replace(/[^0-9+]/g, ""));
+}
+
+// Display the cleaned number in familiar local form -- the raw field value is
+// kept as the link's tooltip so a note like "husband" isn't lost.
+function formatPhoneDisplay(raw) {
+  const e164 = toE164Au(raw);
+  const mobile = /^\+61(4\d{2})(\d{3})(\d{3})$/.exec(e164);
+  if (mobile) return `0${mobile[1]} ${mobile[2]} ${mobile[3]}`;
+  const landline = /^\+61(\d)(\d{4})(\d{4})$/.exec(e164);
+  if (landline) return `(0${landline[1]}) ${landline[2]} ${landline[3]}`;
+  return e164 || String(raw || "");
 }
 
 // Deep link into the ServiceM8 web app's job card -- same /openjob/<uuid>
@@ -217,7 +231,15 @@ export async function renderDashboardHtml(env, tenantId, token) {
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
           ${r.address_display ? `<div class="cust-addr">${escapeHtml(r.address_display)}</div>` : ""}
-          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone">${IC_PHONE}${escapeHtml(r.contact_phone_cache)}</a>` : ""}
+          ${
+            r.contact_phone_cache
+              ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone" title="As stored in ServiceM8: ${escapeHtml(r.contact_phone_cache)}">${IC_PHONE}${escapeHtml(formatPhoneDisplay(r.contact_phone_cache))}</a>${
+                  isSendableMobile(r.contact_phone_cache)
+                    ? ""
+                    : `<span class="nosms-chip" title="Not an Australian mobile, so SMS can't be delivered -- email or call instead, or correct the number in ServiceM8">no SMS</span>`
+                }`
+              : ""
+          }
           ${draftHtml}
         </td>
         <td class="c-service"><span class="svc-tag">${escapeHtml(r.service_name || "Unknown")}</span></td>
@@ -327,6 +349,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .cust-addr { font-size: 11.5px; color: var(--muted); margin-top: 1px; white-space: pre-line; line-height: 1.35; }
   .cust-phone { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12.5px; font-weight: 650; color: var(--accent); text-decoration: none; }
   .cust-phone:hover { text-decoration: underline; }
+  .nosms-chip { display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 750; letter-spacing: .03em; text-transform: uppercase; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 1px 6px; vertical-align: 1px; cursor: help; }
   .svc-tag { display: inline-block; font-size: 11.5px; font-weight: 650; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; }
   .c-date, .c-due { white-space: nowrap; }
   .date-val { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }

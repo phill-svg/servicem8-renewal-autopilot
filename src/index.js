@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -580,6 +580,40 @@ async function handleDebugSmsProbe(request, env) {
   }
 }
 
+// Phone-number normalization check that SENDS NOTHING. Exists because the
+// only previous way to find out whether a number would be accepted was to
+// actually send to it -- which, on 2026-08-07, put a real (undeliverable)
+// message against a customer's job while testing the validator.
+// ?phone= checks one number; ?tenant= audits every tracked customer's.
+async function handleDebugCheckPhone(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const phone = url.searchParams.get("phone");
+  const tenantId = url.searchParams.get("tenant");
+
+  if (phone !== null) {
+    return json({ input: phone, normalized: toE164Au(phone), sendable: isSendableMobile(phone) });
+  }
+  if (!tenantId) return json({ error: "?phone= or ?tenant= required" }, { status: 400 });
+
+  const { results } = await env.DB.prepare(
+    `SELECT contact_name_cache, contact_phone_cache, last_job_number FROM due_customers
+     WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL`
+  )
+    .bind(tenantId)
+    .all();
+  const unsendable = (results || [])
+    .filter((r) => !isSendableMobile(r.contact_phone_cache))
+    .map((r) => ({
+      name: r.contact_name_cache,
+      job: r.last_job_number,
+      stored: r.contact_phone_cache,
+      normalized: toE164Au(r.contact_phone_cache) || null,
+      reason: r.contact_phone_cache ? "not an Australian mobile" : "no phone number on file",
+    }));
+  return json({ tracked: (results || []).length, sendable: (results || []).length - unsendable.length, unsendable });
+}
+
 // Admin-gated raw ServiceM8 GET passthrough, for diagnosing data issues.
 async function handleDebugRaw(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
@@ -623,6 +657,7 @@ export default {
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
+    if (pathname === "/debug/check-phone" && method === "GET") return handleDebugCheckPhone(request, env);
     if (pathname === "/debug/sms-probe" && method === "POST") return handleDebugSmsProbe(request, env);
 
     if (pathname === "/") {

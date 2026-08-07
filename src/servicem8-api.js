@@ -87,11 +87,33 @@ async function platformPostJson(env, tenantId, path, body) {
 // ServiceM8's Messaging API requires E.164 ("+61412345678"), not local
 // Australian format ("0412 345 678" / "0412345678") -- confirmed in the docs
 // alongside the endpoint-path fix above.
-function toE164Au(phone) {
-  const digits = (phone || "").replace(/[^0-9+]/g, "");
+//
+// Real contact records are messier than that. Seen live in TCB's account:
+// two numbers crammed into one field ("61403232912,0403232912"), a trailing
+// note ("0410414736 husband"), and numbers already carrying the country code
+// but no plus ("61417894656"). Stripping non-digits alone concatenated the
+// first case into "614032329120403232912", which ServiceM8 rejected with
+// errorCode 405 -- so take only the FIRST number in the field and normalize
+// the country code explicitly rather than assuming a leading 0.
+export function toE164Au(phone) {
+  const first = String(phone || "").split(/[,;/]| or /i)[0];
+  const digits = first.replace(/[^0-9+]/g, "");
+  if (!digits) return "";
   if (digits.startsWith("+")) return digits;
   if (digits.startsWith("0")) return "+61" + digits.slice(1);
+  if (digits.startsWith("61")) return "+" + digits; // country code, missing plus
+  if (digits.startsWith("4") && digits.length === 9) return "+61" + digits; // leading 0 lost
   return digits;
+}
+
+// Guard before spending a send on a number that cannot work. AU numbers are
+// held to the mobile shape (+614xxxxxxxx) since SMS to a landline is always
+// rejected; anything else only has to look like plausible E.164, so an
+// overseas customer isn't blocked by an AU-centric rule.
+export function isSendableMobile(phone) {
+  const e164 = toE164Au(phone);
+  if (!/^\+\d{8,15}$/.test(e164)) return false;
+  return e164.startsWith("+61") ? /^\+614\d{8}$/.test(e164) : true;
 }
 
 // ServiceM8's filter language only supports eq/ne/gt/lt -- no substring, no
@@ -373,6 +395,14 @@ export async function registerWebhook(env, tenantId, { event, callbackUrl }) {
 // failure didn't. So a 200 body without a messageID is treated as a failure
 // here, with the raw body preserved in the error for the audit trail.
 export async function sendPlatformSms(env, tenantId, { to, message, regardingJobUuid }) {
+  // Fail with something staff can act on. ServiceM8's own rejection quotes the
+  // mangled digits back ("614032329120403232912 is not a valid mobile number")
+  // without saying which contact or what to do about it.
+  if (!isSendableMobile(to)) {
+    throw new Error(
+      `Invalid mobile number "${to}" -- SMS not sent. Fix this contact's phone in ServiceM8: it needs to be a single Australian mobile (e.g. 0412 345 678).`
+    );
+  }
   const result = await platformPostJson(env, tenantId, `/platform_service_sms`, {
     to: toE164Au(to),
     message,
