@@ -35,15 +35,24 @@ function formatPhoneDisplay(raw) {
   return e164 || String(raw || "");
 }
 
-// Deep link into the ServiceM8 web app's job card -- same /openjob/<uuid>
-// form the TCB site already uses. Labelled with generated_job_id (the "Job
-// #87" number staff recognise) when we have it; the uuid alone is enough to
-// build a working link, so rows recomputed before that column existed still
-// get one, just labelled generically until the next recompute fills it in.
+// The "Job #87" number staff recognise, as a tap-to-copy chip: copying the
+// number and pasting it into ServiceM8's own search is currently the only
+// reliable way to get from a row to its job.
+//
+// This WAS a deep link, and isn't any more. Two candidate URLs were tested
+// against the real account (2026-08-11) and both land on the ServiceM8 home
+// page rather than the job, while logged in:
+//   - https://go.servicem8.com/openjob/<uuid>   (developer FAQ's documented form)
+//   - https://resource.servicem8.com/job/<uuid> (the `url` ServiceM8's own
+//     resource API returns for a job)
+// The stored uuid is not the problem -- it was verified against the live API
+// (a7e25758-... really is job #357). Whatever route the web app uses is
+// undocumented, so rather than ship a third guess this stays a copy action.
+// The uuid still rides along in data-job-uuid: the moment a working URL is
+// known, this becomes an <a> again and nothing else has to change.
 function jobLink(jobUuid, jobNumber) {
-  if (!jobUuid) return "";
-  const label = jobNumber ? `#${jobNumber}` : "Open job";
-  return `<a class="job-chip" href="https://go.servicem8.com/openjob/${escapeHtml(jobUuid)}" target="_blank" rel="noopener" title="Open this job in ServiceM8 to see all notes, photos and forms">${IC_EXTERNAL}${escapeHtml(label)}</a>`;
+  if (!jobNumber) return "";
+  return `<button type="button" class="job-chip" data-job-number="${escapeHtml(jobNumber)}" data-job-uuid="${escapeHtml(jobUuid || "")}" title="Copy job number ${escapeHtml(jobNumber)} -- paste it into ServiceM8's search to open the job">${IC_COPY}#${escapeHtml(jobNumber)}</button>`;
 }
 
 // Inline (self-contained, CSP-safe) Feather-style icons -- currentColor so
@@ -51,7 +60,8 @@ function jobLink(jobUuid, jobNumber) {
 const IC_PHONE = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
 const IC_CAL = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
 const IC_SEND = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
-const IC_EXTERNAL = `<svg class="ic" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
+const IC_COPY = `<svg class="ic" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const IC_PERSON = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
 
 // ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
 // here (AU format), not the time-of-day the job happened to be closed out.
@@ -102,7 +112,11 @@ function dueChipText(days) {
   return days < 0 ? `${n}${unit} overdue` : `in ${n}${unit}`;
 }
 
-export async function renderDashboardHtml(env, tenantId, token) {
+// focusCompanyUuid: set when the queue was opened from a Client card, so the
+// page lands showing just that client's renewals (across every bucket) with a
+// one-click way back to the full list. Ignored when the client has no tracked
+// renewals -- a banner says so rather than presenting an empty table.
+export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUuid = null } = {}) {
   const { results: dueCustomers } = await env.DB.prepare(
     `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL ORDER BY bucket, last_completed_at`
   )
@@ -275,7 +289,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
-      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" style="--accent:${s.accent};--rowbg:${s.bg};">
+      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}" style="--accent:${s.accent};--rowbg:${s.bg};">
         <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -321,6 +335,18 @@ export async function renderDashboardHtml(env, tenantId, token) {
   allRowsData.forEach((r) => (counts[r.tabBucket] = (counts[r.tabBucket] || 0) + 1));
 
   const rows = allRowsData.map((r) => r.html).join("\n");
+
+  // Focus state for a queue opened from a Client card. A client with no
+  // tracked renewals still gets a banner (saying so) rather than a silently
+  // full list, so the button never looks like it did nothing.
+  const focusRows = focusCompanyUuid ? (dueCustomers || []).filter((r) => r.servicem8_company_uuid === focusCompanyUuid) : [];
+  const focusActive = !!focusCompanyUuid && focusRows.length > 0;
+  const focusName = focusRows.length ? focusRows[0].contact_name_cache || "this client" : "";
+  const focusBanner = !focusCompanyUuid
+    ? ""
+    : focusActive
+      ? `<div class="focus-bar" id="focus-bar">${IC_PERSON}<span>Showing <b>${escapeHtml(focusName)}</b> only &mdash; ${focusRows.length} tracked renewal${focusRows.length === 1 ? "" : "s"}</span><button type="button" id="focus-clear" class="focus-clear">Show all customers</button></div>`
+      : `<div class="focus-bar muted">${IC_PERSON}<span>This client has no tracked renewals yet &mdash; showing the full queue.</span></div>`;
 
   // Default-active tab is always one of the four urgency buckets (the
   // Contacted stages live in a dropdown, not the tab strip, so they never
@@ -406,7 +432,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .due-date { display: block; font-size: 12.5px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
   .due-date.muted { color: var(--faint); font-weight: 500; }
   .due-chip { display: inline-block; margin-top: 4px; font-size: 10.5px; font-weight: 750; letter-spacing: .02em; text-transform: uppercase; border-radius: 6px; padding: 2px 7px; }
-  .job-chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; font-size: 11px; font-weight: 700; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 8px; text-decoration: none; font-variant-numeric: tabular-nums; transition: all .12s; }
+  .job-chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; font-size: 11px; font-weight: 700; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 8px; text-decoration: none; font-variant-numeric: tabular-nums; transition: all .12s; font-family: inherit; cursor: pointer; }
+  .job-chip.copied { color: #166534; background: #dcfce7; border-color: #bbf7d0; }
   .job-chip:hover { color: var(--brand-ink); background: #fef2f2; border-color: #fecaca; }
   .job-chip .ic { color: var(--faint); }
   .job-chip:hover .ic { color: var(--brand); }
@@ -454,6 +481,12 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .empty-state, #empty-filtered { padding: 52px 24px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; font-size: 14px; line-height: 1.6; box-shadow: var(--sh-sm); max-width: 520px; margin: 0 auto; }
   #empty-filtered { display: none; margin-top: 9px; }
 
+  .focus-bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 0 0 14px; padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; }
+  .focus-bar.muted { color: var(--muted); background: #f7f8fa; border-color: var(--line-2); }
+  .focus-bar .ic { color: currentColor; flex: none; }
+  .focus-clear { margin-left: auto; background: var(--surface); border: 1px solid #fecaca; border-radius: 8px; padding: 5px 11px; font-size: 12px; font-weight: 650; color: var(--brand-ink); cursor: pointer; transition: all .12s; }
+  .focus-clear:hover { background: var(--brand); border-color: var(--brand); color: #fff; }
+
   @media (max-width: 620px) {
     .topbar-in, .wrap { padding-left: 14px; padding-right: 14px; }
     .filter { margin-left: 0; width: 100%; }
@@ -470,6 +503,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
 </div></div>
 <div class="wrap">
 <div class="sub" id="sub-count">${actionableCount} customer${actionableCount === 1 ? "" : "s"} due for renewal</div>
+${focusBanner}
 <div class="nav">
   <div class="tabs">
     <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue <span class="n">${counts.overdue}</span></button>
@@ -515,6 +549,11 @@ ${
   var emptyFiltered = document.getElementById('empty-filtered');
   var searchBox = document.getElementById('search-box');
 
+  // Set when opened from a Client card. Like searching, it spans every bucket
+  // -- the point is to see everything tracked for that client, whichever tab
+  // each row would normally live in.
+  var focusCompany = ${JSON.stringify(focusActive ? focusCompanyUuid : "")};
+
   function applyFilters() {
     var serviceValue = filterSelect.value;
     var q = (searchBox.value || '').trim().toLowerCase();
@@ -522,15 +561,19 @@ ${
     allRows.forEach(function (row) {
       // While searching, look across ALL buckets/tabs so a name can be found
       // wherever the customer sits; otherwise filter by the active tab.
-      var bucketMatch = q ? true : row.dataset.bucket === activeBucket;
+      var bucketMatch = (q || focusCompany) ? true : row.dataset.bucket === activeBucket;
       var serviceMatch = !serviceValue || row.dataset.service === serviceValue;
       var searchMatch = !q || (row.dataset.name || '').indexOf(q) !== -1;
-      var match = bucketMatch && serviceMatch && searchMatch;
+      var companyMatch = !focusCompany || row.dataset.company === focusCompany;
+      var match = bucketMatch && serviceMatch && searchMatch && companyMatch;
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
     var noun;
-    if (q) {
+    if (focusCompany && !q) {
+      noun = visibleCount === 1 ? ' tracked renewal' : ' tracked renewals';
+      document.getElementById('sub-count').textContent = visibleCount + noun;
+    } else if (q) {
       noun = visibleCount === 1 ? ' match for \\u201c' + q + '\\u201d' : ' matches for \\u201c' + q + '\\u201d';
       document.getElementById('sub-count').textContent = visibleCount + noun;
     } else {
@@ -541,10 +584,57 @@ ${
   }
   searchBox.addEventListener('input', applyFilters);
 
+  // Tap-to-copy the job number. navigator.clipboard needs a secure context,
+  // which this page always is, but it still rejects when the tab isn't
+  // focused or permission is denied -- hence the execCommand fallback, which
+  // is what actually fires on older in-app browsers.
+  document.addEventListener('click', function (ev) {
+    var chip = ev.target.closest ? ev.target.closest('.job-chip') : null;
+    if (!chip) return;
+    var num = chip.dataset.jobNumber || '';
+    var done = function () {
+      var was = chip.innerHTML;
+      chip.classList.add('copied');
+      chip.textContent = 'Copied ' + num;
+      setTimeout(function () { chip.innerHTML = was; chip.classList.remove('copied'); }, 1400);
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(num).then(done, function () { legacyCopy(num); done(); });
+      } else { legacyCopy(num); done(); }
+    } catch (e) { legacyCopy(num); done(); }
+  });
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'absolute';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e) {}
+  }
+
+  // Any deliberate move to a tab, a Contacted stage, or "Show all customers"
+  // leaves the single-client view -- otherwise those controls would appear to
+  // do nothing while the client filter silently kept everything else hidden.
+  var focusBar = document.getElementById('focus-bar');
+  function clearFocus() {
+    if (!focusCompany) return;
+    focusCompany = '';
+    if (focusBar) focusBar.style.display = 'none';
+  }
+  var focusClearBtn = document.getElementById('focus-clear');
+  if (focusClearBtn) focusClearBtn.addEventListener('click', function () { clearFocus(); applyFilters(); });
+
   var contactedSelect = document.getElementById('contacted-select');
 
   tabBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
+      clearFocus();
       tabBtns.forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       contactedSelect.value = '';
@@ -559,6 +649,7 @@ ${
   // dropdown itself lights up so it's clear it -- not a tab -- is the active view.
   contactedSelect.addEventListener('change', function () {
     if (!contactedSelect.value) return;
+    clearFocus();
     tabBtns.forEach(function (b) { b.classList.remove('active'); });
     contactedSelect.classList.add('active');
     activeBucket = contactedSelect.value;
