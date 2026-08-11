@@ -4,7 +4,7 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories } from "./servicem8-api.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -17,8 +17,33 @@ const STYLE = {
   contacted: { accent: "#64748b", bg: "#f7f8fa", pillBg: "#e2e8f0", pillFg: "#334155", label: "Contacted" },
 };
 
+// Contact fields hold things like "61403232912,0403232912" (two numbers in
+// one field) or "0410414736 husband". Stripping non-digits alone dialled the
+// two numbers concatenated, so this shares the SMS sender's normalizer.
 function telHref(p) {
-  return "tel:" + String(p || "").replace(/[^0-9+]/g, "");
+  return "tel:" + (toE164Au(p) || String(p || "").replace(/[^0-9+]/g, ""));
+}
+
+// Display the cleaned number in familiar local form -- the raw field value is
+// kept as the link's tooltip so a note like "husband" isn't lost.
+function formatPhoneDisplay(raw) {
+  const e164 = toE164Au(raw);
+  const mobile = /^\+61(4\d{2})(\d{3})(\d{3})$/.exec(e164);
+  if (mobile) return `0${mobile[1]} ${mobile[2]} ${mobile[3]}`;
+  const landline = /^\+61(\d)(\d{4})(\d{4})$/.exec(e164);
+  if (landline) return `(0${landline[1]}) ${landline[2]} ${landline[3]}`;
+  return e164 || String(raw || "");
+}
+
+// Deep link into the ServiceM8 web app's job card -- same /openjob/<uuid>
+// form the TCB site already uses. Labelled with generated_job_id (the "Job
+// #87" number staff recognise) when we have it; the uuid alone is enough to
+// build a working link, so rows recomputed before that column existed still
+// get one, just labelled generically until the next recompute fills it in.
+function jobLink(jobUuid, jobNumber) {
+  if (!jobUuid) return "";
+  const label = jobNumber ? `#${jobNumber}` : "Open job";
+  return `<a class="job-chip" href="https://go.servicem8.com/openjob/${escapeHtml(jobUuid)}" target="_blank" rel="noopener" title="Open this job in ServiceM8 to see all notes, photos and forms">${IC_EXTERNAL}${escapeHtml(label)}</a>`;
 }
 
 // Inline (self-contained, CSP-safe) Feather-style icons -- currentColor so
@@ -26,6 +51,7 @@ function telHref(p) {
 const IC_PHONE = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`;
 const IC_CAL = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`;
 const IC_SEND = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
+const IC_EXTERNAL = `<svg class="ic" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
 
 // ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
 // here (AU format), not the time-of-day the job happened to be closed out.
@@ -116,10 +142,13 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const roundDrafts = drafts.filter((d) => (d.round || 1) === currentRound);
       const smsDraft = roundDrafts.find((d) => d.channel === "sms");
       const emailDraft = roundDrafts.find((d) => d.channel === "email");
-      const pendingChannels = [
-        smsDraft && smsDraft.status === "pending" ? "sms" : null,
-        emailDraft && emailDraft.status === "pending" ? "email" : null,
-      ].filter(Boolean);
+      // 'failed' counts as actionable alongside 'pending': it's either a send
+      // error or the delivery-verification sweep catching a silent delivery
+      // failure -- both mean the customer still hasn't been reached, so the
+      // row must stay in (or return to) its urgency bucket for a re-send.
+      const actionable = (d) => d && (d.status === "pending" || d.status === "failed");
+      const pendingChannels = [actionable(smsDraft) ? "sms" : null, actionable(emailDraft) ? "email" : null].filter(Boolean);
+      const failedDrafts = roundDrafts.filter((d) => d.status === "failed");
       const everSent = drafts.some((d) => d.status === "sent");
       // For the "sent" chip: whichever channel(s) went out in the most recently
       // completed round.
@@ -127,29 +156,60 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const lastSentRound = sentRounds.length ? Math.max(...sentRounds) : 0;
       const sentChannels = drafts.filter((d) => d.status === "sent" && (d.round || 1) === lastSentRound);
 
-      // The composer offers EVERY still-pending draft (any round), deduped to
-      // the newest per channel -- so even in a Contacted view, if the other
-      // channel hasn't gone out yet, staff can still send it from here.
+      // The composer offers EVERY channel this customer can actually be
+      // reached on, every time -- an unsent draft where there is one, else the
+      // last thing sent, offered again as a re-send. Sending is never one
+      // channel OR the other: chase by SMS twice, then email, then SMS again,
+      // in whatever order suits. Drafts are newest-first, so the first match
+      // per channel is the current one.
       const pendById = {};
-      for (const d of drafts) if (d.status === "pending" && !pendById[d.channel]) pendById[d.channel] = d;
-      const composerChannels = ["sms", "email"].filter((ch) => pendById[ch]);
+      const resendById = {};
+      for (const d of drafts) if ((d.status === "pending" || d.status === "failed") && !pendById[d.channel]) pendById[d.channel] = d;
+      for (const d of drafts) {
+        if (d.status === "sent" && !pendById[d.channel]) {
+          pendById[d.channel] = d;
+          resendById[d.channel] = true;
+        }
+      }
+      // Don't offer a channel we know can't deliver: SMS needs a real mobile
+      // (landlines carry the "no SMS" chip), email needs an address.
+      const channelReachable = { sms: isSendableMobile(r.contact_phone_cache), email: !!r.contact_email_cache };
+      const composerChannels = ["sms", "email"].filter((ch) => pendById[ch] && channelReachable[ch]);
 
+      // Rendered OUTSIDE the collapsed composer so a failure is visible
+      // without expanding anything.
+      const failedNote = failedDrafts.length
+        ? `<div class="sent-row">${failedDrafts.map((d) => `<span class="failed-chip" title="${escapeHtml(d.error || "Send failed")}">&#10007; ${escapeHtml(d.channel.toUpperCase())} delivery failed &mdash; resend</span>`).join("")}</div>`
+        : "";
+      // An opened email is the strongest signal we have that a reminder
+      // actually reached a human, so it gets its own green chip rather than
+      // being folded into the generic "sent".
       const sentNote = sentChannels.length
-        ? `<div class="sent-row">${sentChannels.map((d) => `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`).join("")}</div>`
+        ? `<div class="sent-row">${sentChannels
+            .map((d) =>
+              d.opened_at
+                ? `<span class="opened-chip" title="Opened ${escapeHtml(d.opened_at)}">&#9993; ${escapeHtml(d.channel.toUpperCase())} opened ${escapeHtml(formatDateOnly(d.opened_at))}</span>`
+                : `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`
+            )
+            .join("")}</div>`
         : "";
 
       let draftHtml;
       if (!composerChannels.length) {
         // Nothing left to send -- just show what's gone out (or nothing yet).
-        draftHtml = sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`);
+        draftHtml = failedNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
       } else {
         const bodyAttrs = composerChannels
-          .map((ch) => `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}"`)
+          .map(
+            (ch) =>
+              `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}" data-resend-${ch}="${resendById[ch] ? "1" : "0"}"`
+          )
           .join(" ");
         // Composer is collapsed by default (native <details>) so the list
         // stays dense -- staff click "Review & send" to expand it inline.
         const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
-        draftHtml = `<details class="draft-wrap">
+        const first = composerChannels[0];
+        draftHtml = `${failedNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
@@ -158,8 +218,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
                 .join("")}</div>
               <span class="draft-hint">pick a channel &amp; edit before sending</span>
             </div>
-            <textarea class="draft-textarea">${escapeHtml(pendById[composerChannels[0]].draft_body)}</textarea>
-            <button class="approve-btn">${IC_SEND}<span>Send <b class="send-ch">${composerChannels[0].toUpperCase()}</b></span></button>
+            <textarea class="draft-textarea">${escapeHtml(pendById[first].draft_body)}</textarea>
+            <button class="approve-btn"${resendById[first] ? ' data-resending="1"' : ""}>${IC_SEND}<span><b class="send-verb">${resendById[first] ? "Re-send" : "Send"}</b> <b class="send-ch">${first.toUpperCase()}</b></span></button>
             ${sentNote}
           </div>
         </details>`;
@@ -185,12 +245,21 @@ export async function renderDashboardHtml(env, tenantId, token) {
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
           ${r.address_display ? `<div class="cust-addr">${escapeHtml(r.address_display)}</div>` : ""}
-          ${r.contact_phone_cache ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone">${IC_PHONE}${escapeHtml(r.contact_phone_cache)}</a>` : ""}
+          ${
+            r.contact_phone_cache
+              ? `<a href="${telHref(r.contact_phone_cache)}" class="cust-phone" title="As stored in ServiceM8: ${escapeHtml(r.contact_phone_cache)}">${IC_PHONE}${escapeHtml(formatPhoneDisplay(r.contact_phone_cache))}</a>${
+                  isSendableMobile(r.contact_phone_cache)
+                    ? ""
+                    : `<span class="nosms-chip" title="Not an Australian mobile, so SMS can't be delivered -- email or call instead, or correct the number in ServiceM8">no SMS</span>`
+                }`
+              : ""
+          }
           ${draftHtml}
         </td>
         <td class="c-service"><span class="svc-tag">${escapeHtml(r.service_name || "Unknown")}</span></td>
         <td class="c-date">
           <span class="date-val">${IC_CAL}${escapeHtml(formatDateOnly(r.last_completed_at))}</span>
+          ${jobLink(r.last_job_uuid, r.last_job_number)}
           ${
             r.last_job_notes_cache
               ? `<details class="job-notes">
@@ -294,6 +363,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .cust-addr { font-size: 11.5px; color: var(--muted); margin-top: 1px; white-space: pre-line; line-height: 1.35; }
   .cust-phone { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12.5px; font-weight: 650; color: var(--accent); text-decoration: none; }
   .cust-phone:hover { text-decoration: underline; }
+  .nosms-chip { display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 750; letter-spacing: .03em; text-transform: uppercase; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 1px 6px; vertical-align: 1px; cursor: help; }
   .svc-tag { display: inline-block; font-size: 11.5px; font-weight: 650; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 3px 9px; }
   .c-date, .c-due { white-space: nowrap; }
   .date-val { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
@@ -301,6 +371,10 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .due-date { display: block; font-size: 12.5px; font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
   .due-date.muted { color: var(--faint); font-weight: 500; }
   .due-chip { display: inline-block; margin-top: 4px; font-size: 10.5px; font-weight: 750; letter-spacing: .02em; text-transform: uppercase; border-radius: 6px; padding: 2px 7px; }
+  .job-chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; font-size: 11px; font-weight: 700; color: var(--ink-2); background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 8px; text-decoration: none; font-variant-numeric: tabular-nums; transition: all .12s; }
+  .job-chip:hover { color: var(--brand-ink); background: #fef2f2; border-color: #fecaca; }
+  .job-chip .ic { color: var(--faint); }
+  .job-chip:hover .ic { color: var(--brand); }
   .job-notes { margin-top: 6px; }
   .job-notes summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; display: inline-flex; align-items: center; gap: 3px; }
   .job-notes summary:hover { color: var(--ink-2); }
@@ -313,6 +387,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .sent-chip { font-size: 11px; font-weight: 700; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .failed-chip { font-size: 11px; font-weight: 700; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .opened-chip { font-size: 11px; font-weight: 700; color: #166534; background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
@@ -462,9 +538,14 @@ ${
     var editedByChannel = {};
     var current = chanBtns.length ? chanBtns[0].dataset.ch : 'sms';
 
+    var sendVerb = card.querySelector('.send-verb');
+    function isResend(ch) {
+      return card.dataset['resend' + ch.charAt(0).toUpperCase() + ch.slice(1)] === '1';
+    }
     function loadChannel(ch) {
       textarea.value = editedByChannel[ch] !== undefined ? editedByChannel[ch] : (card.dataset['body' + ch.charAt(0).toUpperCase() + ch.slice(1)] || '');
       if (sendCh) sendCh.textContent = ch.toUpperCase();
+      if (sendVerb) sendVerb.textContent = isResend(ch) ? 'Re-send' : 'Send';
     }
     chanBtns.forEach(function (b) {
       b.addEventListener('click', function () {
@@ -480,6 +561,8 @@ ${
     btn.addEventListener('click', async function () {
       var ch = current;
       var draftId = card.dataset['draft' + ch.charAt(0).toUpperCase() + ch.slice(1)];
+      var resending = isResend(ch);
+      if (resending && !confirm('Send this ' + ch.toUpperCase() + ' again? The customer has already had one.')) return;
       btn.disabled = true;
       chanBtns.forEach(function (x) { x.disabled = true; });
       btn.textContent = 'Sending...';
@@ -487,7 +570,7 @@ ${
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value }),
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, resend: resending }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
@@ -549,10 +632,16 @@ async function advanceReminderRound(env, dueCustomerId, sentRound) {
 // before sending -- when present (and non-empty after trimming) it's what
 // actually gets sent, and it's persisted onto the draft row so the record
 // reflects what really went out, not the original auto-generated wording.
-export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
+export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { resend = false } = {}) {
   const draft = await env.DB.prepare("SELECT * FROM reminder_drafts WHERE id = ? AND tenant_id = ?").bind(draftId, tenantId).first();
   if (!draft) throw new Error("draft not found for this tenant");
-  if (draft.status !== "pending") return; // already actioned -- idempotent
+  // 'failed' is re-sendable: covers both an immediate send error and the
+  // delivery-verification sweep flipping a false "sent" back to failed.
+  // An already-'sent' draft only goes again on an explicit resend, so staff
+  // can chase by SMS twice (or email twice, or any mix) without one send
+  // closing off the channel -- while a double-clicked button still can't.
+  const reSendable = draft.status === "pending" || draft.status === "failed" || (resend && draft.status === "sent");
+  if (!reSendable) return; // already actioned -- idempotent
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
@@ -584,14 +673,20 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody) {
     // Store the ServiceM8 messageID returned by the Messaging API, for
     // diagnostics/audit (matching an add-on send to a Job Diary entry).
     const messageId = (result && (result.messageID || result.messageUUID)) || null;
-    await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ? WHERE id = ?")
+    // delivery_status resets to NULL so the verification sweep re-checks this
+    // send even when it's a retry of a previously failed draft.
+    await env.DB.prepare(
+      "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, servicem8_message_uuid = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL, opened_at = NULL WHERE id = ?"
+    )
       .bind(body, Date.now(), Date.now(), messageId, draftId)
       .run();
     await advanceReminderRound(env, draft.due_customer_id, draft.round);
   } catch (err) {
     const message = String(err && err.message);
     if (message.includes("has already been sent")) {
-      await env.DB.prepare("UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ? WHERE id = ?")
+      await env.DB.prepare(
+        "UPDATE reminder_drafts SET status = 'sent', draft_body = ?, sent_at = ?, reviewed_at = ?, error = NULL, delivery_status = NULL, delivery_checked_at = NULL, opened_at = NULL WHERE id = ?"
+      )
         .bind(body, Date.now(), Date.now(), draftId)
         .run();
       await advanceReminderRound(env, draft.due_customer_id, draft.round);
