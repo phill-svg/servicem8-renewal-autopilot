@@ -424,7 +424,16 @@ async function handleAddonQueue(request, env) {
 
   const origin = new URL(request.url).origin;
   const token = await createDashboardToken(env.SERVICEM8_APP_SECRET, tenant.servicem8_account_uuid);
-  const dashboardUrl = `${origin}/dashboard?token=${encodeURIComponent(token)}`;
+  // Client-card button (manifest action entity "company"): open the queue
+  // focused on the client whose card was clicked, rather than the whole list.
+  // The job-card button and the Add-ons menu item send no company, so they
+  // keep opening the full queue. ServiceM8's own docs don't pin down the
+  // eventArgs key for a company action, so every plausible spelling is
+  // accepted -- an unrecognised one simply means no focus, not a broken page.
+  const args = payload?.eventArgs || {};
+  const companyUuid = args.companyUUID || args.company_uuid || args.clientUUID || args.client_uuid || null;
+  const dashboardUrl =
+    `${origin}/dashboard?token=${encodeURIComponent(token)}` + (companyUuid ? `&company=${encodeURIComponent(companyUuid)}` : "");
   return addonResponse(dashboardRedirectHtml(dashboardUrl));
 }
 
@@ -441,7 +450,8 @@ async function handleDashboard(request, env) {
       headers: { "Content-Type": "text/html" },
     });
   }
-  const html = await renderDashboardHtml(env, tenantId, token);
+  const focusCompanyUuid = new URL(request.url).searchParams.get("company");
+  const html = await renderDashboardHtml(env, tenantId, token, { focusCompanyUuid });
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 

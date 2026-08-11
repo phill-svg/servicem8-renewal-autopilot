@@ -25,6 +25,14 @@
       "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
       "event": "open_queue",
       "location": "modal"
+    },
+    {
+      "name": "Renewal Autopilot",
+      "type": "online",
+      "entity": "company",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "event": "open_client_queue",
+      "location": "modal"
     }
   ]
 }
