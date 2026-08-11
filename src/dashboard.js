@@ -65,6 +65,29 @@ function formatJsDate(d) {
   return d ? `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}` : "";
 }
 
+// Send timestamps are epoch ms, but the Worker's clock is UTC -- an 8am
+// Canberra send lands on the previous UTC day, so formatting one naively
+// shows staff the wrong date. A fixed AU zone matches the rest of the
+// add-on's AU-only assumptions (see toE164Au in servicem8-api.js).
+const AU_TZ = { timeZone: "Australia/Sydney" };
+const AU_DATE_FMT = new Intl.DateTimeFormat("en-AU", { ...AU_TZ, day: "2-digit", month: "2-digit", year: "numeric" });
+const AU_DATETIME_FMT = new Intl.DateTimeFormat("en-AU", { ...AU_TZ, day: "2-digit", month: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit" });
+function formatEpochAu(ms, fmt = AU_DATE_FMT) {
+  const n = Number(ms);
+  return n ? fmt.format(new Date(n)) : "";
+}
+
+// "3 days ago" / "2 weeks ago" -- same small-number scaling as dueChipText,
+// spelled out because this one only ever appears in a hover tooltip.
+function agoText(ms) {
+  const days = Math.floor((Date.now() - Number(ms)) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "1 day ago";
+  if (days < 14) return `${days} days ago`;
+  if (days < 60) return `${Math.round(days / 7)} weeks ago`;
+  return `${Math.round(days / 30)} months ago`;
+}
+
 // A short relative-time label for the next-due date: "12d overdue" / "in 3w"
 // / "in 4mo" / "due today". Days under a fortnight stay in days, then weeks,
 // then months, so the number stays small and scannable at any range.
@@ -176,6 +199,18 @@ export async function renderDashboardHtml(env, tenantId, token) {
       const channelReachable = { sms: isSendableMobile(r.contact_phone_cache), email: !!r.contact_email_cache };
       const composerChannels = ["sms", "email"].filter((ch) => pendById[ch] && channelReachable[ch]);
 
+      // When the chase started, and on which channel. The per-round "sent"
+      // chips only ever describe the LATEST round, so once round 2 or 3 goes
+      // out there's nothing left showing how long this customer has been
+      // chased -- this is that. Earliest actual send across every round, not
+      // the draft's creation, since a draft can sit pending for days. Rendered
+      // outside the collapsed composer so it reads without expanding anything.
+      const sentDrafts = drafts.filter((d) => d.status === "sent" && d.sent_at);
+      const firstSent = sentDrafts.length ? sentDrafts.reduce((a, b) => (Number(a.sent_at) <= Number(b.sent_at) ? a : b)) : null;
+      const firstContactNote = firstSent
+        ? `<div class="sent-row"><span class="first-chip" title="First reminder sent ${escapeHtml(formatEpochAu(firstSent.sent_at, AU_DATETIME_FMT))} (${escapeHtml(agoText(firstSent.sent_at))}) &mdash; ${sentDrafts.length} reminder${sentDrafts.length === 1 ? "" : "s"} sent in total">${IC_CAL}First contact ${escapeHtml(formatEpochAu(firstSent.sent_at))} &middot; ${escapeHtml(firstSent.channel.toUpperCase())}</span></div>`
+        : "";
+
       // Rendered OUTSIDE the collapsed composer so a failure is visible
       // without expanding anything.
       const failedNote = failedDrafts.length
@@ -197,7 +232,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
       let draftHtml;
       if (!composerChannels.length) {
         // Nothing left to send -- just show what's gone out (or nothing yet).
-        draftHtml = failedNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
+        draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
       } else {
         const bodyAttrs = composerChannels
           .map(
@@ -209,7 +244,7 @@ export async function renderDashboardHtml(env, tenantId, token) {
         // stays dense -- staff click "Review & send" to expand it inline.
         const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
         const first = composerChannels[0];
-        draftHtml = `${failedNote}<details class="draft-wrap">
+        draftHtml = `${failedNote}${firstContactNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
@@ -387,6 +422,8 @@ export async function renderDashboardHtml(env, tenantId, token) {
   .draft-none { margin-top: 8px; font-size: 12px; color: var(--faint); font-style: italic; }
   .sent-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .sent-chip { font-size: 11px; font-weight: 700; color: #334155; background: #e2e8f0; border: 1px solid #cbd5e1; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .first-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; color: var(--muted); background: #f8fafc; border: 1px solid var(--line-2); border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; font-variant-numeric: tabular-nums; cursor: help; }
+  .first-chip .ic { color: var(--faint); }
   .failed-chip { font-size: 11px; font-weight: 700; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .opened-chip { font-size: 11px; font-weight: 700; color: #166534; background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
