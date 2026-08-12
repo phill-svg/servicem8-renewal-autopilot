@@ -6,9 +6,9 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -504,6 +504,48 @@ function requireAdminAuth(request, env) {
   return key === env.SERVICEM8_APP_SECRET;
 }
 
+// Runs the badge hand-off on demand instead of waiting for the nightly cron.
+// Defaults to a DRY RUN: ?apply=1 is required before anything is written,
+// because this edits badges staff applied by hand in ServiceM8. The dry run
+// reports exactly which jobs would gain and lose the badge, so the change can
+// be eyeballed before it happens.
+async function handleDebugBadgeHandoff(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const apply = url.searchParams.get("apply") === "1";
+
+  try {
+    if (apply) return json({ mode: "applied", ...(await reassignBadgesForTenant(env, tenantId)) });
+
+    const { results: rules } = await env.DB.prepare(
+      "SELECT * FROM category_config WHERE tenant_id = ? AND signal_type = 'badge' AND is_tracked = 1 AND servicem8_badge_uuid IS NOT NULL"
+    )
+      .bind(tenantId)
+      .all();
+    const jobs = (await listAllCompletedJobs(env, tenantId)) || [];
+    const warranty = new Set(
+      ((await listCategories(env, tenantId)) || []).filter((c) => /warranty/i.test(c.name || "")).map((c) => c.uuid)
+    );
+    const planned = [];
+    for (const rule of rules || []) {
+      for (const m of planBadgeMoves(jobs, rule.servicem8_badge_uuid, warranty)) {
+        planned.push({
+          rule: rule.category_name_cache,
+          address: m.addressKey,
+          addTo: m.addTo ? `#${m.addTo.generated_job_id} (${m.addTo.uuid})` : null,
+          removeFrom: m.removeFrom.map((j) => `#${j.generated_job_id} (${j.uuid})`),
+          dateChanged: m.dateChanged,
+        });
+      }
+    }
+    return json({ mode: "dry-run", jobsScanned: jobs.length, rules: (rules || []).length, moves: planned.length, planned });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugCategories(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
@@ -669,6 +711,7 @@ export default {
     if (pathname === "/dashboard/approve" && method === "POST") return handleDashboardApprove(request, env);
     if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
 
+    if (pathname === "/debug/badge-handoff" && method === "GET") return handleDebugBadgeHandoff(request, env);
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
