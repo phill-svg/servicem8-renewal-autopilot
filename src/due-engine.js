@@ -69,12 +69,22 @@ async function fetchJobsForRule(env, tenantId, rule, { before } = {}) {
 
 const BACKFILL_CHUNK_DAYS = 180; // ~6 months per chunk, keeps each API call and D1 batch bounded
 
-function normalizeStreet(addr) {
+// The dedupe key that decides which jobs belong to the same customer at the
+// same property. Exported for tests because getting it wrong silently merges
+// two properties into one -- and since 2026-08-12 that mistake is visible in
+// ServiceM8, where the badge hand-off would move a badge across them.
+//
+// The slash is KEPT: stripping it turned "2/9 Hopman Pl" into "29 hopman pl",
+// identical to a real 29 Hopman Pl on the same street. 14% of TCB's tracked
+// addresses are units, so this was one property-manager client away from
+// merging two homes. No such collision existed in the live data when this was
+// fixed, which is why the key migration was a clean rename.
+export function normalizeStreet(addr) {
   return (addr || "")
     .split(",")[0]
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, "");
+    .replace(/[^a-z0-9 /]/g, "");
 }
 
 function addMonths(date, months) {

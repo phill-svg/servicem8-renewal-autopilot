@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -546,6 +546,51 @@ async function handleDebugBadgeHandoff(request, env) {
   }
 }
 
+// One-off migration for the normalizeStreet fix that stopped the slash being
+// stripped from unit numbers. address_key is part of due_customers' UNIQUE
+// constraint, so leaving stale keys behind would make the next recompute
+// INSERT a second row per affected customer rather than update the existing
+// one -- 41 duplicated customers in the dashboard, each with its own drafts.
+//
+// Recomputes the key from address_display (the raw ServiceM8 address) using
+// the current normalizeStreet, so it stays correct if that function changes
+// again. Dry run by default; ?apply=1 to write. A row whose new key would
+// collide with an existing row is reported and skipped rather than merged --
+// that case needs a human, not a guess.
+async function handleDebugRekeyAddresses(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const apply = url.searchParams.get("apply") === "1";
+
+  const { results: rows } = await env.DB.prepare(
+    "SELECT id, address_key, address_display, servicem8_company_uuid, category_config_id FROM due_customers WHERE tenant_id = ?"
+  )
+    .bind(tenantId)
+    .all();
+
+  const changed = [];
+  const conflicts = [];
+  for (const r of rows || []) {
+    const newKey = normalizeStreet(r.address_display);
+    if (!newKey || newKey === r.address_key) continue;
+    const clash = await env.DB.prepare(
+      "SELECT id FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ? AND id != ?"
+    )
+      .bind(tenantId, r.servicem8_company_uuid, newKey, r.category_config_id, r.id)
+      .first();
+    if (clash) {
+      conflicts.push({ id: r.id, from: r.address_key, to: newKey, collidesWith: clash.id });
+      continue;
+    }
+    changed.push({ id: r.id, from: r.address_key, to: newKey, display: r.address_display });
+    if (apply) await env.DB.prepare("UPDATE due_customers SET address_key = ? WHERE id = ?").bind(newKey, r.id).run();
+  }
+
+  return json({ mode: apply ? "applied" : "dry-run", scanned: (rows || []).length, changed: changed.length, conflicts, changes: changed });
+}
+
 async function handleDebugCategories(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
@@ -712,6 +757,7 @@ export default {
     if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
 
     if (pathname === "/debug/badge-handoff" && method === "GET") return handleDebugBadgeHandoff(request, env);
+    if (pathname === "/debug/rekey-addresses" && method === "GET") return handleDebugRekeyAddresses(request, env);
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
