@@ -389,6 +389,23 @@ function signOff(body, settings) {
 // date than round 2, regardless of which number the user calls it.
 const FOLLOWUP_LEAD_DAYS = { 2: 5, 3: 2 };
 
+// The date the next auto-drafted follow-up is due to appear: the customer's
+// due date, minus this round's lead time. Exported because the dashboard
+// shows staff this exact date -- deriving it there instead would duplicate
+// FOLLOWUP_LEAD_DAYS and let the display drift from what the engine really
+// does the moment the schedule is tuned.
+//
+// Returns null when no round is scheduled: round 1 is sent by hand, and
+// round 4 means the sequence is exhausted and nothing further will ever be
+// generated.
+export function nextFollowUpDraftDate(dueCustomer, intervalMonths) {
+  const leadDays = FOLLOWUP_LEAD_DAYS[dueCustomer.reminder_round];
+  if (!leadDays || !intervalMonths) return null;
+  const completedAt = parseServiceM8Date(dueCustomer.last_completed_at);
+  if (!completedAt) return null;
+  return addDays(addMonths(completedAt, intervalMonths), -leadDays);
+}
+
 const FOLLOWUP_TEMPLATES = {
   2: {
     sms: "Hi {{name}}, just a friendly follow-up -- your pest treatment is coming up due. Reply here or give us a call to lock in a time!",
@@ -406,13 +423,8 @@ const FOLLOWUP_TEMPLATES = {
 
 async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMonths) {
   const round = dueCustomer.reminder_round;
-  const leadDays = FOLLOWUP_LEAD_DAYS[round];
-  if (!leadDays) return; // round 1 (not sent yet) or round 4+ (sequence already exhausted)
-
-  const completedAt = parseServiceM8Date(dueCustomer.last_completed_at);
-  if (!completedAt) return;
-  const dueDate = addMonths(completedAt, intervalMonths);
-  const triggerFrom = addDays(dueDate, -leadDays);
+  const triggerFrom = nextFollowUpDraftDate(dueCustomer, intervalMonths);
+  if (!triggerFrom) return; // round 1 (sent by hand) or round 4+ (sequence exhausted)
   if (new Date() < triggerFrom) return; // not time yet for this round
 
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";

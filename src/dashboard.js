@@ -4,6 +4,7 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
+import { nextFollowUpDraftDate } from "./due-engine.js";
 import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
@@ -62,6 +63,7 @@ const IC_CAL = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill=
 const IC_SEND = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
 const IC_COPY = `<svg class="ic" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const IC_PERSON = `<svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+const IC_CLOCK = `<svg class="ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>`;
 
 // ServiceM8 timestamps are "YYYY-MM-DD HH:MM:SS" -- staff just want the date
 // here (AU format), not the time-of-day the job happened to be closed out.
@@ -128,6 +130,31 @@ function dueChipText(days) {
 // page lands showing just that client's renewals (across every bucket) with a
 // one-click way back to the full list. Ignored when the client has no tracked
 // renewals -- a banner says so rather than presenting an empty table.
+// What happens next for a customer who has already been contacted. Rounds 2
+// and 3 are auto-DRAFTED by the nightly cron and then wait for a human to
+// approve them -- so this says "drafts", never "sends". Claiming otherwise
+// would let staff assume a customer is being chased when nobody has pressed
+// the button.
+//
+// After round 3 nothing further is ever generated, and that customer goes
+// silent permanently unless someone notices -- hence the warning variant,
+// which is as much the point of this chip as the date is.
+function nextReminderChip(r, intervalMonths) {
+  if ((r.reminder_round || 1) >= 4) {
+    return `<div class="sent-row"><span class="next-chip warn" title="All three reminders have been sent. Nothing further is scheduled for this customer -- chase them by hand, or dismiss the row.">&#9888; Final reminder sent &mdash; nothing further scheduled</span></div>`;
+  }
+  const at = nextFollowUpDraftDate(r, intervalMonths);
+  if (!at) return "";
+  const days = Math.round((at.getTime() - Date.now()) / 86400000);
+  const tip =
+    "The next reminder is drafted automatically on this date and waits here for you to approve and send it. This row moves back into its urgency tab when that happens.";
+  const label =
+    days > 0
+      ? `Next reminder drafts ${escapeHtml(formatJsDate(at))} &middot; ${escapeHtml(dueChipText(days))}`
+      : "Next reminder drafts tonight";
+  return `<div class="sent-row"><span class="next-chip" title="${escapeHtml(tip)}">${IC_CLOCK}${label}</span></div>`;
+}
+
 export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUuid = null } = {}) {
   const { results: dueCustomers } = await env.DB.prepare(
     `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL ORDER BY bucket, last_completed_at`
@@ -199,6 +226,9 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const pendingChannels = [actionable(smsDraft) ? "sms" : null, actionable(emailDraft) ? "email" : null].filter(Boolean);
       const failedDrafts = roundDrafts.filter((d) => d.status === "failed");
       const everSent = drafts.some((d) => d.status === "sent");
+      // Computed here rather than beside the tab/style code below because the
+      // next-reminder chip needs it while draftHtml is still being built.
+      const alreadyContacted = everSent && !pendingChannels.length;
       // For the "sent" chip: whichever channel(s) went out in the most recently
       // completed round.
       const sentRounds = drafts.filter((d) => d.status === "sent").map((d) => d.round || 1);
@@ -279,10 +309,14 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       };
       const sentNote = sentChannels.length ? `<div class="sent-row">${sentChannels.map(sentChip).join("")}</div>` : "";
 
+      // Only Contacted rows: a row still in an urgency bucket has a draft
+      // waiting right now, so a future date there would just be noise.
+      const nextNote = alreadyContacted ? nextReminderChip(r, intervalByConfig.get(r.category_config_id)) : "";
+
       let draftHtml;
       if (!composerChannels.length) {
         // Nothing left to send -- just show what's gone out (or nothing yet).
-        draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`));
+        draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`)) + nextNote;
       } else {
         const bodyAttrs = composerChannels
           .map(
@@ -302,7 +336,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
         // state was hidden behind a click on effectively every row -- staff saw
         // no delivery or read-receipt information at all unless they happened
         // to open the composer.
-        draftHtml = `${failedNote}${firstContactNote}${sentNote}<details class="draft-wrap">
+        draftHtml = `${failedNote}${firstContactNote}${sentNote}${nextNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
@@ -325,7 +359,6 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       // src/due-engine.js's generateFollowUpDraftsForTenant), those drafts are
       // pending again, so they automatically move BACK into their urgency
       // bucket to be actioned -- then to Contacted N+1 once sent, and so on.
-      const alreadyContacted = everSent && !pendingChannels.length;
       const contactedRound = Math.min(Math.max((r.reminder_round || 1) - 1, 1), 3);
       const tabBucket = alreadyContacted ? `contacted${contactedRound}` : r.bucket;
       const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
@@ -499,6 +532,14 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   /* Between "sent" (grey, unverified) and "opened" (green, read by a human):
      confirmed delivered, but nobody has necessarily looked at it. */
   .delivered-chip { font-size: 11px; font-weight: 700; color: #115e59; background: #ccfbf1; border: 1px solid #99f6e4; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  /* What the system will do next, unprompted. Deliberately quieter than the
+     delivery chips -- it reports a schedule, not an outcome. */
+  .next-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; color: #475569; background: #f1f5f9; border: 1px solid var(--line-2); border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  .next-chip .ic { color: var(--faint); }
+  /* The sequence has run out: this customer will never be contacted again
+     unless a human acts, so it earns a warning colour. */
+  .next-chip.warn { color: #92400e; background: #fef3c7; border-color: #fde68a; }
+  .next-chip.warn .ic { color: #b45309; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
