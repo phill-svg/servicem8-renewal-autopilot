@@ -71,6 +71,18 @@ function formatDateOnly(s) {
   return y && m && d ? `${d}/${m}/${y}` : datePart;
 }
 
+// Same "YYYY-MM-DD HH:MM:SS" input as formatDateOnly, keeping the time. Read
+// receipts (reminder_drafts.opened_at) come straight off ServiceM8's
+// email.json and are ALREADY in the account's local time, so this splits the
+// string rather than going through Date -- parsing it would treat it as UTC
+// and shift an 11:35 open to the previous evening.
+function formatSm8DateTime(s) {
+  const [datePart, timePart] = String(s || "").split(" ");
+  const date = formatDateOnly(datePart);
+  const hm = String(timePart || "").slice(0, 5);
+  return hm ? `${date} ${hm}` : date;
+}
+
 function formatJsDate(d) {
   return d ? `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}` : "";
 }
@@ -230,18 +242,42 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const failedNote = failedDrafts.length
         ? `<div class="sent-row">${failedDrafts.map((d) => `<span class="failed-chip" title="${escapeHtml(d.error || "Send failed")}">&#10007; ${escapeHtml(d.channel.toUpperCase())} delivery failed &mdash; resend</span>`).join("")}</div>`
         : "";
-      // An opened email is the strongest signal we have that a reminder
-      // actually reached a human, so it gets its own green chip rather than
-      // being folded into the generic "sent".
-      const sentNote = sentChannels.length
-        ? `<div class="sent-row">${sentChannels
-            .map((d) =>
-              d.opened_at
-                ? `<span class="opened-chip" title="Opened ${escapeHtml(d.opened_at)}">&#9993; ${escapeHtml(d.channel.toUpperCase())} opened ${escapeHtml(formatDateOnly(d.opened_at))}</span>`
-                : `<span class="sent-chip">&#10003; ${escapeHtml(d.channel.toUpperCase())} sent</span>`
-            )
-            .join("")}</div>`
-        : "";
+      // Three distinct states, because "we pressed send" and "it actually got
+      // there" are different facts and staff chasing a customer need to tell
+      // them apart. The verification sweep (verifyDeliveries in
+      // src/due-engine.js) has always written delivery_status/opened_at; until
+      // now the dashboard rendered neither, so a confirmed delivery and an
+      // unverified send looked identical.
+      //
+      //   opened     -- green. Email only: a real read receipt off email.json.
+      //   delivered  -- teal. delivery_status 'confirmed'. For email that's an
+      //                 email.json record; for SMS it's INFERRED from the
+      //                 message appearing in the job's SMS history (ServiceM8
+      //                 exposes no SMS delivery-status field), so the label is
+      //                 "delivered", never "read" or "received by them".
+      //   sent       -- grey. Still inside the sweep's grace window, so
+      //                 delivery is genuinely not known yet -- say so rather
+      //                 than implying it landed.
+      //
+      // Every chip carries its send time on hover; the open chip shows the
+      // open time inline, since "when did they read it" is the whole point.
+      const sentChip = (d) => {
+        const ch = escapeHtml(d.channel.toUpperCase());
+        const sentAt = d.sent_at ? `${formatEpochAu(d.sent_at, AU_DATETIME_FMT)} (${agoText(d.sent_at)})` : "unknown time";
+        if (d.opened_at) {
+          return `<span class="opened-chip" title="Sent ${escapeHtml(sentAt)} &mdash; opened by the customer ${escapeHtml(formatSm8DateTime(d.opened_at))}">&#9993; ${ch} opened ${escapeHtml(formatSm8DateTime(d.opened_at))}</span>`;
+        }
+        if (d.delivery_status === "confirmed") {
+          const how =
+            d.channel === "sms"
+              ? "confirmed delivered -- it appears in this job's SMS history in ServiceM8. There is no read receipt for SMS."
+              : "confirmed delivered -- ServiceM8 has an email record for it. Not opened yet.";
+          return `<span class="delivered-chip" title="Sent ${escapeHtml(sentAt)} &mdash; ${escapeHtml(how)}">&#10003; ${ch} delivered</span>`;
+        }
+        const on = formatEpochAu(d.sent_at);
+        return `<span class="sent-chip" title="Sent ${escapeHtml(sentAt)} &mdash; delivery not confirmed yet, the check runs within about 15 minutes of sending">&#10003; ${ch} sent${on ? ` ${escapeHtml(on)}` : ""}</span>`;
+      };
+      const sentNote = sentChannels.length ? `<div class="sent-row">${sentChannels.map(sentChip).join("")}</div>` : "";
 
       let draftHtml;
       if (!composerChannels.length) {
@@ -258,7 +294,15 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
         // stays dense -- staff click "Review & send" to expand it inline.
         const chanLabel = composerChannels.map((c) => c.toUpperCase()).join(" / ");
         const first = composerChannels[0];
-        draftHtml = `${failedNote}${firstContactNote}<details class="draft-wrap">
+        // sentNote goes OUTSIDE the <details>, next to the failure and
+        // first-contact chips, for the same reason they are: it has to read
+        // without expanding anything. It used to sit inside .draft-card, and
+        // since every reachable customer now gets a composer (any sent channel
+        // is offered again as a re-send), that meant the sent/delivered/opened
+        // state was hidden behind a click on effectively every row -- staff saw
+        // no delivery or read-receipt information at all unless they happened
+        // to open the composer.
+        draftHtml = `${failedNote}${firstContactNote}${sentNote}<details class="draft-wrap">
           <summary class="draft-toggle">${IC_SEND}<span>Review &amp; send ${escapeHtml(chanLabel)}</span></summary>
           <div class="draft-card" data-row="${escapeHtml(r.id)}" ${bodyAttrs}>
             <div class="draft-head">
@@ -269,7 +313,6 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
             </div>
             <textarea class="draft-textarea">${escapeHtml(pendById[first].draft_body)}</textarea>
             <button class="approve-btn"${resendById[first] ? ' data-resending="1"' : ""}>${IC_SEND}<span><b class="send-verb">${resendById[first] ? "Re-send" : "Send"}</b> <b class="send-ch">${first.toUpperCase()}</b></span></button>
-            ${sentNote}
           </div>
         </details>`;
       }
@@ -453,6 +496,9 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   .first-chip .ic { color: var(--faint); }
   .failed-chip { font-size: 11px; font-weight: 700; color: #991b1b; background: #fee2e2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .opened-chip { font-size: 11px; font-weight: 700; color: #166534; background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
+  /* Between "sent" (grey, unverified) and "opened" (green, read by a human):
+     confirmed delivered, but nobody has necessarily looked at it. */
+  .delivered-chip { font-size: 11px; font-weight: 700; color: #115e59; background: #ccfbf1; border: 1px solid #99f6e4; border-radius: 999px; padding: 3px 10px; letter-spacing: .01em; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
