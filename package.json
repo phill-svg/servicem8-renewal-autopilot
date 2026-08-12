@@ -2,10 +2,12 @@
   "name": "renewal-autopilot",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "tracks recurring-service due dates per customer and queues renewal reminders for staff approval.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "node --test test/**/*.test.js",
     "db:init": "wrangler d1 execute renewal-autopilot-db --local --file=./schema.sql",
     "db:init:remote": "wrangler d1 execute renewal-autopilot-db --remote --file=./schema.sql"
   },
