@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -220,6 +220,10 @@ async function runNightlyReconciliation(env) {
     const runId = randomId();
     const startedAt = Date.now();
     try {
+      // Before the recompute, not after: a customer serviced again since the
+      // last run needs their badge on the newer job so the recompute picks up
+      // the new date in this same pass rather than a day late.
+      await reassignBadgesForTenant(env, tenant.servicem8_account_uuid);
       const { jobsScanned } = await recomputeAllCategoriesForTenant(env, tenant.servicem8_account_uuid);
       await generateFollowUpDraftsForTenant(env, tenant.servicem8_account_uuid);
       await env.DB.prepare(

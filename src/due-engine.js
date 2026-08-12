@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords, listJobEmailRecords } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, parseBadges, updateJobBadges } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -487,6 +487,168 @@ export async function recomputeAllCategoriesForTenant(env, tenantId) {
     await upsertJobsAsDueCandidates(env, tenantId, rule, jobs || []);
   }
   return { jobsScanned };
+}
+
+// ---- badge hand-off -------------------------------------------------------
+
+// A badge-based rule only ever sees jobs that CARRY the badge. So when a
+// customer is serviced again before their renewal falls due, the newer job is
+// invisible to the engine, last_completed_at never moves, and the customer
+// gets chased for a service they already had.
+//
+// Category-based rules don't have this problem: their candidate list is every
+// job in the category, and upsertJobsAsDueCandidates already keeps the most
+// recently completed one per (company, address).
+//
+// This closes that gap by moving the badge onto the newer job. Two properties
+// matter more than anything else here, because this WRITES to ServiceM8 and
+// edits badges staff applied by hand:
+//
+//   1. It only ever RELOCATES a badge. If no job in a group carries the badge,
+//      the group is skipped -- so the set of tracked customers can shrink or
+//      consolidate, but never grow behind anyone's back.
+//   2. It is idempotent and self-healing. Adding to the new job and removing
+//      from the old ones are separate API calls; if the process dies between
+//      them the badge is briefly on both, which is harmless (the engine keeps
+//      the most recent job anyway) and is cleaned up on the next run.
+// The decision half, kept pure and exported so every rule below can be tested
+// without stubbing ServiceM8: given jobs, it returns the writes that should
+// happen. reassignBadgeForRule performs them. Deciding and writing are split
+// because deciding is where the risk lives -- a wrong grouping rule here
+// edits real jobs.
+//
+// Each move: { companyUuid, addressKey, addTo: job|null, removeFrom: [job],
+// dateChanged: bool }. addTo is null when the newest job is already correct
+// and only stale duplicates need clearing.
+export function planBadgeMoves(jobs, badgeUuid, warrantyCategoryUuids = new Set()) {
+  const groups = new Map();
+  for (const job of jobs) {
+    if (warrantyCategoryUuids.has(job.category_uuid)) continue; // a warranty callback must not push the renewal out
+    const addressKey = normalizeStreet(job.job_address);
+    // A blank address would collapse every job at this company into one
+    // group and hand the badge to an unrelated property's job.
+    if (!addressKey || !job.company_uuid) continue;
+    const completedAt = parseServiceM8Date(job.completion_date);
+    if (!completedAt) continue;
+    const key = `${job.company_uuid}|${addressKey}`;
+    if (!groups.has(key)) groups.set(key, { companyUuid: job.company_uuid, addressKey, entries: [] });
+    groups.get(key).entries.push({ job, completedAt });
+  }
+
+  const moves = [];
+  for (const [, group] of groups) {
+    const carries = (job) => parseBadges(job.badges).includes(badgeUuid);
+    const badged = group.entries.filter((e) => carries(e.job));
+    if (!badged.length) continue; // see property 1 above -- never introduces tracking
+
+    const latest = group.entries.reduce((a, b) => (a.completedAt >= b.completedAt ? a : b));
+    const latestAlreadyBadged = carries(latest.job);
+    const stale = badged.filter((e) => e.job.uuid !== latest.job.uuid);
+    // Checking `stale` as well as `latestAlreadyBadged` is what makes a
+    // half-finished previous run heal rather than strand a badge on an old job.
+    if (latestAlreadyBadged && !stale.length) continue;
+
+    moves.push({
+      companyUuid: group.companyUuid,
+      addressKey: group.addressKey,
+      addTo: latestAlreadyBadged ? null : latest.job,
+      removeFrom: stale.map((e) => e.job),
+      // Only a badge landing on a different job changes the due date; merely
+      // tidying a duplicate does not.
+      dateChanged: !latestAlreadyBadged,
+    });
+  }
+  return moves;
+}
+
+async function reassignBadgeForRule(env, tenantId, rule, jobs, warrantyCategoryUuids) {
+  const moves = planBadgeMoves(jobs, rule.servicem8_badge_uuid, warrantyCategoryUuids);
+  let moved = 0;
+  for (const move of moves) {
+    try {
+      if (move.addTo) {
+        // Read-modify-write: updateJobBadges replaces the whole field, so a
+        // blind write would silently destroy other badges staff rely on.
+        const next = [...new Set([...parseBadges(move.addTo.badges), rule.servicem8_badge_uuid])];
+        await updateJobBadges(env, tenantId, move.addTo.uuid, next);
+      }
+      for (const job of move.removeFrom) {
+        await updateJobBadges(
+          env,
+          tenantId,
+          job.uuid,
+          parseBadges(job.badges).filter((b) => b !== rule.servicem8_badge_uuid)
+        );
+      }
+    } catch (err) {
+      console.error(`badge hand-off: failed moving badge ${rule.servicem8_badge_uuid} for tenant ${tenantId}`, err);
+      continue;
+    }
+
+    const target = move.addTo ? `#${move.addTo.generated_job_id || "?"} (${move.addTo.uuid})` : "(already correct)";
+    const from = move.removeFrom.map((j) => `#${j.generated_job_id || "?"} (${j.uuid})`).join(", ") || "nothing";
+    console.log(`badge hand-off: badge ${rule.servicem8_badge_uuid} -> ${target}, cleared from ${from} -- tenant ${tenantId}`);
+
+    if (move.dateChanged) {
+      moved++;
+      await resetReminderSequenceForGroup(env, tenantId, rule, move);
+    }
+  }
+  return moved;
+}
+
+// The customer was serviced, so any unsent reminder from the old cycle is now
+// wrong -- left in the queue, a staff member could send "your treatment is
+// due" to someone serviced last week. Superseded drafts match none of the
+// dashboard's pending/failed/sent filters, so they leave the queue while
+// staying auditable.
+//
+// The due_customers row is found by its natural key, which is exactly the
+// grouping key already in hand. dismissed_at needs no handling: the upsert
+// clears it automatically once last_completed_at moves forward.
+async function resetReminderSequenceForGroup(env, tenantId, rule, move) {
+  const row = await env.DB.prepare(
+    `SELECT id FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ?`
+  )
+    .bind(tenantId, move.companyUuid, move.addressKey, rule.id)
+    .first();
+  if (!row) return; // not tracked yet -- the recompute that follows will create it against the new date
+  await env.DB.prepare("UPDATE reminder_drafts SET status = 'superseded' WHERE due_customer_id = ? AND status = 'pending'")
+    .bind(row.id)
+    .run();
+  await env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL WHERE id = ?").bind(row.id).run();
+}
+
+// Runs on the nightly cron immediately before the recompute, so the recompute
+// sees the corrected badges in the same pass.
+export async function reassignBadgesForTenant(env, tenantId) {
+  const { results: rules } = await env.DB.prepare(
+    "SELECT * FROM category_config WHERE tenant_id = ? AND signal_type = 'badge' AND is_tracked = 1 AND servicem8_badge_uuid IS NOT NULL"
+  )
+    .bind(tenantId)
+    .all();
+  if (!rules || !rules.length) return { moved: 0 };
+
+  let jobs;
+  try {
+    // The same fetch listCompletedJobsForBadge already performs, so reusing it
+    // here costs no extra API calls.
+    jobs = await listAllCompletedJobs(env, tenantId);
+  } catch (err) {
+    console.error(`badge hand-off: failed to list completed jobs for tenant ${tenantId}`, err);
+    return { moved: 0 };
+  }
+
+  const warrantyCategoryUuids = await getWarrantyCategoryUuids(env, tenantId);
+  let moved = 0;
+  for (const rule of rules) {
+    try {
+      moved += await reassignBadgeForRule(env, tenantId, rule, jobs || [], warrantyCategoryUuids);
+    } catch (err) {
+      console.error(`badge hand-off: rule ${rule.id} failed for tenant ${tenantId}`, err);
+    }
+  }
+  return { moved };
 }
 
 // ---- delivery verification ------------------------------------------------
