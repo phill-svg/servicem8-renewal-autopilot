@@ -32,8 +32,8 @@ async function handleInstallStart(request, env) {
 
 function installedPageHtml() {
   return `<!doctype html><html><body style="font-family:sans-serif;padding:2rem;max-width:32rem;margin:0 auto;">
-    <h2>Renewal Autopilot is now installed</h2>
-    <p>Open ServiceM8 and look for Renewal Autopilot in your Add-ons menu to get started make sure you have the specific month badge appied to the jobs.</p>
+    <h2>Job Reminders is now installed</h2>
+    <p>Open ServiceM8 and look for job reminders in your Add-ons menu to get started make sure you have the specific month badge appied to the jobs.</p>
   </body></html>`;
 }
 
