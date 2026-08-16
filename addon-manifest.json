@@ -1,5 +1,5 @@
 {
-  "name": "Renewal Autopilot",
+  "name": "Job Reminders",
   "version": "1.0",
   "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
   "supportURL": "https://tcbpestcontrolcanberra.com.au",
@@ -11,7 +11,7 @@
   },
   "menuItems": [
     {
-      "name": "Renewal Autopilot",
+      "name": "Job Reminders",
       "type": "addon",
       "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
       "event": "open_dashboard"
@@ -19,7 +19,7 @@
   ],
   "actions": [
     {
-      "name": "Renewal Autopilot",
+      "name": "Job Reminders",
       "type": "online",
       "entity": "job",
       "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
@@ -27,9 +27,17 @@
       "location": "modal"
     },
     {
-      "name": "Renewal Autopilot",
+      "name": "Job Reminders",
       "type": "online",
       "entity": "company",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "event": "open_client_queue",
+      "location": "modal"
+    },
+    {  {
+      "name": "Job Reminders",
+      "type": "online",
+      "entity": "job",
       "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
       "event": "open_client_queue",
       "location": "modal"
