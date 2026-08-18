@@ -22,10 +22,10 @@ import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsFo
 // badge with no image renders blank (verified 2026-08-04), which is why a
 // real file_name is essential here rather than relying on ServiceM8 to draw
 // the badge itself.
-const RENEWAL_BADGES = [
-  { name: "Renewal - 3 Month", file: "phill-3month-v1.png", intervalMonths: 3 },
-  { name: "Renewal - 6 Month", file: "phill-6month-v1.png", intervalMonths: 6 },
-  { name: "Renewal - 1 Year", file: "phill-1year-final.png", intervalMonths: 12 },
+export const RENEWAL_BADGES = [
+  { name: "Renewal - 3 Month", file: "phill-3month-v8.png", intervalMonths: 3 },
+  { name: "Renewal - 6 Month", file: "phill-6month-v8.png", intervalMonths: 6 },
+  { name: "Renewal - 1 Year", file: "phill-1year-v8.png", intervalMonths: 12 },
 ];
 
 // Idempotent -- safe to run on every install. Looks up existing badges by
