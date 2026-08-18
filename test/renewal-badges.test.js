@@ -23,3 +23,16 @@ test("each renewal badge has a distinct name and file", () => {
   assert.equal(new Set(RENEWAL_BADGES.map((b) => b.name)).size, RENEWAL_BADGES.length);
   assert.equal(new Set(RENEWAL_BADGES.map((b) => b.file)).size, RENEWAL_BADGES.length);
 });
+
+// ensureRenewalBadges matches against existing ServiceM8 badges by exact
+// name. TCB's live account already has these three, hand-made before this
+// add-on existed ("3 month auto" / "6 month auto" / "1 year auto") -- any
+// other spelling ("Renewal - 3 Month", different case, ...) misses that
+// lookup and creates a duplicate badge with the generic placeholder image
+// instead of reusing the real one.
+test("badge names match TCB's existing live ServiceM8 badges exactly", () => {
+  assert.deepEqual(
+    RENEWAL_BADGES.map((b) => b.name),
+    ["3 month auto", "6 month auto", "1 year auto"]
+  );
+});
