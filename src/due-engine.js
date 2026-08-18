@@ -23,9 +23,9 @@ import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsFo
 // real file_name is essential here rather than relying on ServiceM8 to draw
 // the badge itself.
 export const RENEWAL_BADGES = [
-  { name: "Renewal - 3 Month", file: "phill-3month-v8.png", intervalMonths: 3 },
-  { name: "Renewal - 6 Month", file: "phill-6month-v8.png", intervalMonths: 6 },
-  { name: "Renewal - 1 Year", file: "phill-1year-v8.png", intervalMonths: 12 },
+  { name: "3 month auto", file: "phill-3month-v8.png", intervalMonths: 3 },
+  { name: "6 month auto", file: "phill-6month-v8.png", intervalMonths: 6 },
+  { name: "1 year auto", file: "phill-1year-v8.png", intervalMonths: 12 },
 ];
 
 // Idempotent -- safe to run on every install. Looks up existing badges by
