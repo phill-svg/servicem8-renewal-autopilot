@@ -6,9 +6,9 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -603,6 +603,41 @@ async function handleDebugCategories(request, env) {
   }
 }
 
+// Pushes the current RENEWAL_BADGES sprite files onto whichever badges
+// already exist with those exact names -- ensureRenewalBadges only creates
+// missing badges, so a tenant whose "3 month auto"/"6 month auto"/"1 year
+// auto" badges pre-date a sprite change (e.g. the v9 gray/yellow/green
+// recolor) never picks it up on its own. Dry run by default; ?apply=1 to
+// actually call ServiceM8. Matches by exact badge name, same lookup
+// ensureRenewalBadges uses.
+async function handleDebugUpdateBadgeImages(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const apply = url.searchParams.get("apply") === "1";
+
+  try {
+    const existing = (await listBadges(env, tenantId)) || [];
+    const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
+
+    const planned = [];
+    for (const { name, file } of RENEWAL_BADGES) {
+      const uuid = existingByName.get(name);
+      if (!uuid) {
+        planned.push({ name, status: "no matching live badge -- ensureRenewalBadges will create it on next install/run" });
+        continue;
+      }
+      const fileUrl = `${url.origin}/assets/images/${file}`;
+      if (apply) await updateBadge(env, tenantId, uuid, { fileUrl });
+      planned.push({ name, uuid, fileUrl, status: apply ? "updated" : "would update" });
+    }
+    return json({ mode: apply ? "applied" : "dry-run", badges: planned });
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 // Configures a tracking rule -- either signalType "category" (categoryUuid)
 // or "badge" (badgeUuid). No DB-level unique constraint on the target uuid
 // since a tenant may have several rules of either kind; upsert is done by
@@ -759,6 +794,7 @@ export default {
     if (pathname === "/debug/badge-handoff" && method === "GET") return handleDebugBadgeHandoff(request, env);
     if (pathname === "/debug/rekey-addresses" && method === "GET") return handleDebugRekeyAddresses(request, env);
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
+    if (pathname === "/debug/update-badge-images" && method === "GET") return handleDebugUpdateBadgeImages(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);

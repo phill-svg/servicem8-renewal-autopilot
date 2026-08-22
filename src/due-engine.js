@@ -15,17 +15,18 @@ import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsFo
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
 // the add-on is useful. Each points at a generic pre-designed 3-state sprite
-// (64x192, three stacked 64x64 states -- the format ServiceM8 requires) that
-// just shows the cadence in plain text ("1 YEAR" / "6 MONTH" / "3 MONTH"), so
-// they're business-agnostic. These are the exact images TCB's own live
-// badges use, confirmed to render correctly in ServiceM8. A bare API-created
-// badge with no image renders blank (verified 2026-08-04), which is why a
-// real file_name is essential here rather than relying on ServiceM8 to draw
-// the badge itself.
+// (64x192, three stacked 64x64 states -- inactive/hover/active, the format
+// ServiceM8 requires) that just shows the cadence in plain text ("1 YEAR" /
+// "6 MONTH" / "3 MONTH"), so they're business-agnostic. v9 recolors the
+// three states to match ServiceM8's own default badge convention -- gray
+// (inactive) / yellow (hover) / green (active) -- instead of v8's solid
+// green in all three states. A bare API-created badge with no image renders
+// blank (verified 2026-08-04), which is why a real file_name is essential
+// here rather than relying on ServiceM8 to draw the badge itself.
 export const RENEWAL_BADGES = [
-  { name: "3 month auto", file: "phill-3month-v8.png", intervalMonths: 3 },
-  { name: "6 month auto", file: "phill-6month-v8.png", intervalMonths: 6 },
-  { name: "1 year auto", file: "phill-1year-v8.png", intervalMonths: 12 },
+  { name: "3 month auto", file: "phill-3month-v9.png", intervalMonths: 3 },
+  { name: "6 month auto", file: "phill-6month-v9.png", intervalMonths: 6 },
+  { name: "1 year auto", file: "phill-1year-v9.png", intervalMonths: 12 },
 ];
 
 // Idempotent -- safe to run on every install. Looks up existing badges by
