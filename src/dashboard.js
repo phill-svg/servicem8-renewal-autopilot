@@ -197,6 +197,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   for (const r of dueCustomers || []) {
     const completed = parseServiceM8Date(r.last_completed_at);
     const months = intervalByConfig.get(r.category_config_id);
+    r.plan_months = months || null;
     if (completed && months) {
       const due = new Date(completed);
       due.setMonth(due.getMonth() + months);
@@ -365,7 +366,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
-      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}" style="--accent:${s.accent};--rowbg:${s.bg};">
+      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-plan="${escapeHtml(r.plan_months ? String(r.plan_months) : "")}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}" style="--accent:${s.accent};--rowbg:${s.bg};">
         <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -433,6 +434,16 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
 
+  // Renewal-plan tabs (3 month / 6 month / 1 year), separate from the
+  // urgency tabs above -- staff asked to see each renewal cadence's jobs on
+  // its own tab rather than all cadences mixed together. Counts are across
+  // every tracked customer regardless of urgency bucket, same as "All
+  // services" in the filter dropdown.
+  const planCounts = { 3: 0, 6: 0, 12: 0 };
+  for (const r of dueCustomers || []) {
+    if (planCounts[r.plan_months] != null) planCounts[r.plan_months]++;
+  }
+
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Renewal Autopilot</title>
@@ -463,11 +474,12 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   /* nav row */
   .nav { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
   .tabs { display: inline-flex; align-items: center; gap: 3px; background: #eceef2; padding: 4px; border-radius: 11px; }
-  .tab-btn { background: none; border: none; padding: 7px 13px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 8px; transition: all .14s ease; display: inline-flex; align-items: center; gap: 6px; }
-  .tab-btn:hover { color: var(--ink-2); }
-  .tab-btn .n { font-size: 11px; font-weight: 700; color: var(--faint); background: rgba(15,23,42,.06); border-radius: 999px; padding: 1px 6px; min-width: 18px; text-align: center; transition: all .14s; }
-  .tab-btn.active { background: var(--surface); color: var(--ink); box-shadow: var(--sh-md); }
-  .tab-btn.active .n { color: #fff; background: var(--ink); }
+  .tab-btn, .plan-btn { background: none; border: none; padding: 7px 13px; font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; border-radius: 8px; transition: all .14s ease; display: inline-flex; align-items: center; gap: 6px; }
+  .tab-btn:hover, .plan-btn:hover { color: var(--ink-2); }
+  .tab-btn .n, .plan-btn .n { font-size: 11px; font-weight: 700; color: var(--faint); background: rgba(15,23,42,.06); border-radius: 999px; padding: 1px 6px; min-width: 18px; text-align: center; transition: all .14s; }
+  .tab-btn.active, .plan-btn.active { background: var(--surface); color: var(--ink); box-shadow: var(--sh-md); }
+  .tab-btn.active .n, .plan-btn.active .n { color: #fff; background: var(--ink); }
+  .plan-tabs { flex-basis: 100%; }
   .contacted-dd { align-self: center; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line-2); font-size: 13px; font-weight: 600; color: var(--muted); background: var(--surface); cursor: pointer; box-shadow: var(--sh-sm); transition: all .14s; }
   .contacted-dd:hover { border-color: #cbd5e1; color: var(--ink-2); }
   .contacted-dd.active { color: var(--brand-ink); border-color: var(--brand); background: #fef2f2; box-shadow: 0 0 0 3px rgba(220,38,38,.1); }
@@ -615,6 +627,12 @@ ${focusBanner}
       ${filterOptions}
     </select>
   </div>
+  <div class="tabs plan-tabs">
+    <button class="plan-btn active" data-tab-plan="">All plans</button>
+    <button class="plan-btn" data-tab-plan="3">3 month <span class="n">${planCounts[3]}</span></button>
+    <button class="plan-btn" data-tab-plan="6">6 month <span class="n">${planCounts[6]}</span></button>
+    <button class="plan-btn" data-tab-plan="12">1 year <span class="n">${planCounts[12]}</span></button>
+  </div>
 </div>
 ${
   rows
@@ -633,6 +651,12 @@ ${
   var activeBucket = (tabBtns.find(function (b) { return b.classList.contains('active'); }) || {}).dataset;
   activeBucket = activeBucket ? activeBucket.tabBucket : 'overdue';
 
+  // Renewal-plan tabs (3 month / 6 month / 1 year) -- a separate filter
+  // dimension from the urgency tabs above, so a plan choice narrows whichever
+  // urgency tab (or search) is active rather than replacing it.
+  var planBtns = Array.prototype.slice.call(document.querySelectorAll('.plan-btn'));
+  var activePlan = '';
+
   var emptyFiltered = document.getElementById('empty-filtered');
   var searchBox = document.getElementById('search-box');
 
@@ -650,9 +674,10 @@ ${
       // wherever the customer sits; otherwise filter by the active tab.
       var bucketMatch = (q || focusCompany) ? true : row.dataset.bucket === activeBucket;
       var serviceMatch = !serviceValue || row.dataset.service === serviceValue;
+      var planMatch = !activePlan || row.dataset.plan === activePlan;
       var searchMatch = !q || (row.dataset.name || '').indexOf(q) !== -1;
       var companyMatch = !focusCompany || row.dataset.company === focusCompany;
-      var match = bucketMatch && serviceMatch && searchMatch && companyMatch;
+      var match = bucketMatch && serviceMatch && planMatch && searchMatch && companyMatch;
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;
     });
@@ -727,6 +752,16 @@ ${
       contactedSelect.value = '';
       contactedSelect.classList.remove('active');
       activeBucket = btn.dataset.tabBucket;
+      applyFilters();
+    });
+  });
+
+  planBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      clearFocus();
+      planBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      activePlan = btn.dataset.tabPlan;
       applyFilters();
     });
   });
