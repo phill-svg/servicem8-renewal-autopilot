@@ -38,7 +38,7 @@ Key modules (`src/`):
 ## Setup
 
 1. Register the App at [developer.servicem8.com](https://developer.servicem8.com)
-   using `addon-manifest.json` (activation + callback URLs point at the
+   using `manifest.json` (activation + callback URLs point at the
    deployed Worker; a public HTTPS callback is required).
 2. Deploy: `npx wrangler deploy` (or push to `master` — Cloudflare builds it).
 3. Install via the Worker's `/install` URL to run the OAuth flow.
