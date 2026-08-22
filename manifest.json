@@ -1,7 +1,7 @@
 {
   "name": "Job Reminders",
   "version": "1.1",
-  "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+  "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
   "supportURL": "https://tcbpestcontrolcanberra.com.au",
   "supportEmail": "phill@tcbpestcontrolcanberra.com.au",
   "activationURL": "https://renewal-autopilot.phill-abb.workers.dev/install",
@@ -13,7 +13,7 @@
     {
       "name": "Job Reminders",
       "type": "addon",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
       "event": "open_dashboard"
     }
   ],
@@ -22,7 +22,7 @@
       "name": "Job Reminders",
       "type": "online",
       "entity": "job",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
       "event": "open_queue",
       "location": "modal"
     },
@@ -30,14 +30,14 @@
       "name": "Job Reminders",
       "type": "app",
       "entity": "job",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
       "event": "open_queue"
     },
     {
       "name": "Job Reminders",
       "type": "online",
       "entity": "company",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
       "event": "open_client_queue",
       "location": "modal"
     },
@@ -45,7 +45,7 @@
       "name": "Job Reminders",
       "type": "app",
       "entity": "company",
-      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+      "iconURL": "https://renewal-autopilot.phill-abb.workers.dev/assets/images/icon.png",
       "event": "open_client_queue"
     }
   ]

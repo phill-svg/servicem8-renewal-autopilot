@@ -282,7 +282,7 @@ async function runBackfillAndRefreshSweep(env) {
 //
 // Same job-card-action mechanism as tcb-customer-portal's "Approve Forms for
 // Portal" (confirmed working against the real account -- see the "Addons"
-// flyout menu on a job card), registered in addon-manifest.json under
+// flyout menu on a job card), registered in manifest.json under
 // "actions". Unlike that add-on, the callback doesn't render a form inline --
 // it immediately opens the full due/renewal queue as a standalone page in a
 // new tab (src/dashboard.js), authenticated by a short-lived token instead

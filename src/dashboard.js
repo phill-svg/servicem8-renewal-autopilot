@@ -584,7 +584,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
 </head>
 <body>
 <div class="topbar"><div class="topbar-in">
-  <div class="logo"><img src="/assets/images/addon-icon-512.png" alt="Renewal Autopilot logo"></div>
+  <div class="logo"><img src="/assets/images/icon.png" alt="Renewal Autopilot logo"></div>
   <div class="brand-txt"><h1>Renewal Autopilot</h1><div class="tag">Renewal reminder queue</div></div>
   <div class="topbar-count"><b>${(dueCustomers || []).length}</b> tracked</div>
 </div></div>
