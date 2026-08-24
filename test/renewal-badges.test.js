@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { RENEWAL_BADGES } from "../src/due-engine.js";
+import { RENEWAL_BADGES, planBadgeSync } from "../src/due-engine.js";
+
+const ORIGIN = "https://renewal-autopilot.phill-abb.workers.dev";
 
 // ensureRenewalBadges hands these filenames straight to ServiceM8 as
 // `fileUrl: origin/assets/images/<file>`. A stale filename (the previous
@@ -35,4 +37,46 @@ test("badge names match TCB's existing live ServiceM8 badges exactly", () => {
     RENEWAL_BADGES.map((b) => b.name),
     ["3 month auto", "6 month auto", "1 year auto"]
   );
+});
+
+// Regression coverage for the actual bug this fixes: a badge matched by name
+// was never checked against RENEWAL_BADGES' file_name, so a sprite change
+// (e.g. the v9 gray/yellow/green recolor) never reached an already-installed
+// tenant's existing badges without someone manually running
+// /debug/update-badge-images. planBadgeSync is what the new sweep in
+// src/index.js's runBackfillAndRefreshSweep uses to do this automatically.
+test("planBadgeSync: badge missing entirely gets created", () => {
+  const { toCreate, toRefresh } = planBadgeSync([], RENEWAL_BADGES, ORIGIN);
+  assert.deepEqual(
+    toCreate.map((b) => b.name),
+    RENEWAL_BADGES.map((b) => b.name)
+  );
+  assert.deepEqual(toRefresh, []);
+});
+
+test("planBadgeSync: badge already correct is left alone (steady-state no-op)", () => {
+  const existing = RENEWAL_BADGES.map((b) => ({
+    uuid: `uuid-${b.name}`,
+    name: b.name,
+    file_name: `${ORIGIN}/assets/images/${b.file}`,
+  }));
+  const { toCreate, toRefresh } = planBadgeSync(existing, RENEWAL_BADGES, ORIGIN);
+  assert.deepEqual(toCreate, []);
+  assert.deepEqual(toRefresh, []);
+});
+
+test("planBadgeSync: badge exists under the right name but a stale file_name (e.g. pre-v9) gets queued for refresh, not recreated", () => {
+  const existing = [{ uuid: "existing-uuid", name: "3 month auto", file_name: `${ORIGIN}/assets/images/phill-3month-v8.png` }];
+  const { toCreate, toRefresh } = planBadgeSync(existing, RENEWAL_BADGES, ORIGIN);
+  assert.deepEqual(
+    toCreate.map((b) => b.name),
+    ["6 month auto", "1 year auto"]
+  );
+  assert.deepEqual(toRefresh, [{ name: "3 month auto", uuid: "existing-uuid", fileUrl: `${ORIGIN}/assets/images/phill-3month-v9.png` }]);
+});
+
+test("planBadgeSync: a badge with no file_name at all (hand-made, blank) gets queued for refresh", () => {
+  const existing = [{ uuid: "existing-uuid", name: "1 year auto", file_name: null }];
+  const { toRefresh } = planBadgeSync(existing, RENEWAL_BADGES, ORIGIN);
+  assert.deepEqual(toRefresh, [{ name: "1 year auto", uuid: "existing-uuid", fileUrl: `${ORIGIN}/assets/images/phill-1year-v9.png` }]);
 });

@@ -214,6 +214,11 @@ async function handleJobWebhook(env, tenantId, jobUuid) {
 
 const NIGHTLY_CRON = "0 16 * * *";
 
+// Hardcoded rather than derived from a request -- the cron has no incoming
+// request to read an origin from. Matches the URL already hardcoded into
+// manifest.json.
+const PRODUCTION_ORIGIN = "https://renewal-autopilot.phill-abb.workers.dev";
+
 async function runNightlyReconciliation(env) {
   const { results: tenants } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active'").all();
   for (const tenant of tenants || []) {
@@ -276,6 +281,23 @@ async function runBackfillAndRefreshSweep(env) {
   // send response alone doesn't prove that (see verifyDeliveries). Cheap in
   // steady state: two D1 queries per tenant unless unverified sends exist.
   await verifyDeliveries(env);
+
+  // Keep each tenant's Renewal badges in sync with RENEWAL_BADGES -- not
+  // just present at install time. ensureRenewalBadges only sets a badge's
+  // image when it's first created, so a later sprite change (like the v9
+  // gray/yellow/green recolor) would otherwise never reach a tenant whose
+  // badges already existed under those names, without someone manually
+  // running /debug/update-badge-images. This sweep does it automatically;
+  // a badge already in sync is a no-op (see ensureRenewalBadges), so it's
+  // cheap in steady state.
+  const { results: activeTenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
+  for (const { servicem8_account_uuid } of activeTenants || []) {
+    try {
+      await ensureRenewalBadges(env, servicem8_account_uuid, PRODUCTION_ORIGIN);
+    } catch (err) {
+      console.error(`badge sync sweep failed for tenant ${servicem8_account_uuid}`, err);
+    }
+  }
 }
 
 // ---- ServiceM8 Add-on: job-card button -> standalone dashboard -----------
