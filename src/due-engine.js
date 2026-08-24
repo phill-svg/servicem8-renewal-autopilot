@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, parseBadges, updateJobBadges } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, parseBadges, updateJobBadges } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -29,9 +29,35 @@ export const RENEWAL_BADGES = [
   { name: "1 year auto", file: "phill-1year-v9.png", intervalMonths: 12 },
 ];
 
-// Idempotent -- safe to run on every install. Looks up existing badges by
-// exact name first (ServiceM8 badges are account-level, so a reinstall or a
-// re-run never duplicates them), creating only the missing ones. Returns a
+// Pure planning step, split out from ensureRenewalBadges for testing without
+// a live account: decides which RENEWAL_BADGES need creating (no existing
+// badge with that exact name) vs. re-fetching (a badge with that name exists,
+// but its stored file_name doesn't match the URL we'd create it with today).
+// ServiceM8 copies/caches the image at the file_name URL rather than
+// proxying it live, so a badge created (or last refreshed) against a
+// since-changed sprite -- e.g. the v9 gray/yellow/green recolor -- silently
+// keeps showing the old image until something re-POSTs the current
+// file_name. /debug/update-badge-images (see src/index.js) does this
+// on demand; the sweep below does it automatically so nobody has to run it.
+export function planBadgeSync(existingBadges, renewalBadges, origin) {
+  const existingByName = new Map((existingBadges || []).map((b) => [b.name, b]));
+  const toCreate = [];
+  const toRefresh = [];
+  for (const { name, file } of renewalBadges) {
+    const fileUrl = `${origin}/assets/images/${file}`;
+    const existing = existingByName.get(name);
+    if (!existing) {
+      toCreate.push({ name, fileUrl });
+    } else if (existing.file_name !== fileUrl) {
+      toRefresh.push({ name, uuid: existing.uuid, fileUrl });
+    }
+  }
+  return { toCreate, toRefresh };
+}
+
+// Idempotent -- safe to run on every install AND on a recurring sweep (see
+// the cron wiring in src/index.js): a badge whose name and file_name already
+// match RENEWAL_BADGES is left alone, so steady state is a no-op. Returns a
 // { name: uuid } map of all Renewal badges now present. Does NOT wire a
 // tracking rule -- that's the setup wizard's job (the business picks which
 // cadence to track and confirms the interval/templates).
@@ -42,18 +68,26 @@ export async function ensureRenewalBadges(env, tenantId, origin) {
   } catch (err) {
     console.error(`ensureRenewalBadges: failed to list badges for tenant ${tenantId}`, err);
   }
-  const existingByName = new Map(existing.map((b) => [b.name, b.uuid]));
 
   const uuidByName = {};
-  for (const { name, file } of RENEWAL_BADGES) {
-    if (existingByName.has(name)) {
-      uuidByName[name] = existingByName.get(name);
-      continue;
-    }
+  for (const b of existing) {
+    if (RENEWAL_BADGES.some((r) => r.name === b.name)) uuidByName[b.name] = b.uuid;
+  }
+
+  const { toCreate, toRefresh } = planBadgeSync(existing, RENEWAL_BADGES, origin);
+
+  for (const { name, fileUrl } of toCreate) {
     try {
-      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl: `${origin}/assets/images/${file}` });
+      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl });
     } catch (err) {
       console.error(`ensureRenewalBadges: failed to create badge "${name}" for tenant ${tenantId}`, err);
+    }
+  }
+  for (const { name, uuid, fileUrl } of toRefresh) {
+    try {
+      await updateBadge(env, tenantId, uuid, { fileUrl });
+    } catch (err) {
+      console.error(`ensureRenewalBadges: failed to refresh image for badge "${name}" (tenant ${tenantId})`, err);
     }
   }
   return uuidByName;
