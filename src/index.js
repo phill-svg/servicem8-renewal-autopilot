@@ -6,7 +6,7 @@
 
 import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
-import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge } from "./servicem8-api.js";
+import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge, parseBadges } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
@@ -191,9 +191,13 @@ async function handleJobWebhook(env, tenantId, jobUuid) {
   const { results: rules } = await env.DB.prepare("SELECT * FROM category_config WHERE tenant_id = ? AND is_tracked = 1")
     .bind(tenantId)
     .all();
+  // job.badges comes back from ServiceM8 as a JSON-encoded string (see
+  // parseBadges), not a real array -- Array.isArray(job.badges) was always
+  // false, so badge-based rules never matched here and only ever got picked
+  // up by the once-daily nightly cron instead of this real-time webhook path.
   const matchingRules = (rules || []).filter((rule) =>
     rule.signal_type === "badge"
-      ? Array.isArray(job.badges) && job.badges.includes(rule.servicem8_badge_uuid)
+      ? parseBadges(job.badges).includes(rule.servicem8_badge_uuid)
       : job.category_uuid === rule.servicem8_category_uuid
   );
   if (!matchingRules.length) return; // this job doesn't match any tracked rule
