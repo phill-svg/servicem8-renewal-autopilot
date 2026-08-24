@@ -297,12 +297,15 @@ async function runBackfillAndRefreshSweep(env) {
     } catch (err) {
       console.error(`badge sync sweep failed for tenant ${servicem8_account_uuid}`, err);
     }
-    // Legacy-badge migration (see migrateLegacyFollowUpBadges): every job
-    // carrying the old, now-untracked "1 Year Follow-up" badge should also
-    // carry "1 year auto" so it enters live tracking. A no-op once every
-    // such job has been migrated.
+    // PAUSED 2026-08-24: this added "1 year auto" to every job carrying
+    // "1 Year Follow-up" indiscriminately -- no dedup to the latest job per
+    // property (the actual badge hand-off semantics group by company+address
+    // and pick the single latest non-warranty completed job -- see
+    // planBadgeMoves), and it never removed "1 Year Follow-up" either. Live
+    // data may already have been touched by this before it was caught;
+    // re-enable only once replaced with logic that mirrors planBadgeMoves.
     try {
-      await migrateLegacyFollowUpBadges(env, servicem8_account_uuid);
+      // await migrateLegacyFollowUpBadges(env, servicem8_account_uuid);
     } catch (err) {
       console.error(`legacy badge migration failed for tenant ${servicem8_account_uuid}`, err);
     }
