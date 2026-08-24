@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -296,6 +296,15 @@ async function runBackfillAndRefreshSweep(env) {
       await ensureRenewalBadges(env, servicem8_account_uuid, PRODUCTION_ORIGIN);
     } catch (err) {
       console.error(`badge sync sweep failed for tenant ${servicem8_account_uuid}`, err);
+    }
+    // Legacy-badge migration (see migrateLegacyFollowUpBadges): every job
+    // carrying the old, now-untracked "1 Year Follow-up" badge should also
+    // carry "1 year auto" so it enters live tracking. A no-op once every
+    // such job has been migrated.
+    try {
+      await migrateLegacyFollowUpBadges(env, servicem8_account_uuid);
+    } catch (err) {
+      console.error(`legacy badge migration failed for tenant ${servicem8_account_uuid}`, err);
     }
   }
 }

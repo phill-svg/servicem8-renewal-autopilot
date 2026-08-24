@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, parseBadges, updateJobBadges } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -91,6 +91,56 @@ export async function ensureRenewalBadges(env, tenantId, origin) {
     }
   }
   return uuidByName;
+}
+
+// One-off legacy-badge migration: "1 Year Follow-up" predates "1 year auto"
+// and is no longer a tracked rule (is_tracked = 0 in category_config), so any
+// job that only carries the old badge is invisible to the engine. Every job
+// carrying fromBadgeUuid but not toBadgeUuid should also carry toBadgeUuid --
+// read-modify-write, preserving whatever else is on the job. Pure planning
+// step so the "which jobs need this" decision is testable without a live
+// account. Safe to run repeatedly: a job already carrying both is skipped, and
+// if a property ends up with toBadgeUuid on more than one job (an older
+// migrated job plus a newer one already using it), the existing badge
+// hand-off pass (reassignBadgesForTenant) already knows how to consolidate
+// multiple badged jobs onto the latest -- see "consolidates multiple badged
+// jobs onto the latest" in test/badge-handoff.test.js.
+export function planLegacyBadgeMigration(jobsList, fromBadgeUuid, toBadgeUuid) {
+  return (jobsList || []).filter((job) => {
+    const badges = parseBadges(job.badges);
+    return badges.includes(fromBadgeUuid) && !badges.includes(toBadgeUuid);
+  });
+}
+
+export async function migrateLegacyFollowUpBadges(env, tenantId) {
+  let badgesList = [];
+  try {
+    badgesList = (await listBadges(env, tenantId)) || [];
+  } catch (err) {
+    console.error(`migrateLegacyFollowUpBadges: failed to list badges for tenant ${tenantId}`, err);
+    return;
+  }
+  const fromBadge = badgesList.find((b) => b.name === "1 Year Follow-up");
+  const toBadge = badgesList.find((b) => b.name === "1 year auto");
+  if (!fromBadge || !toBadge) return; // nothing to migrate for a tenant without both badges
+
+  let allJobs = [];
+  try {
+    allJobs = (await listAllJobsAnyStatus(env, tenantId)) || [];
+  } catch (err) {
+    console.error(`migrateLegacyFollowUpBadges: failed to list jobs for tenant ${tenantId}`, err);
+    return;
+  }
+
+  const toMigrate = planLegacyBadgeMigration(allJobs, fromBadge.uuid, toBadge.uuid);
+  for (const job of toMigrate) {
+    try {
+      const next = [...new Set([...parseBadges(job.badges), toBadge.uuid])];
+      await updateJobBadges(env, tenantId, job.uuid, next);
+    } catch (err) {
+      console.error(`migrateLegacyFollowUpBadges: failed to update job ${job.uuid} (tenant ${tenantId})`, err);
+    }
+  }
 }
 
 // Dispatches a tracking rule to the right job-fetch strategy. See
