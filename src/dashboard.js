@@ -319,11 +319,17 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
         // Nothing left to send -- just show what's gone out (or nothing yet).
         draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`)) + nextNote;
       } else {
+        // alt_draft_body is only set when the category has a meaningful
+        // second option (see secondaryTemplateFor in due-engine.js) --
+        // absent for a custom tenant-configured template or an
+        // untracked-style category, so the option toggle only renders when
+        // there's actually something to toggle to.
         const bodyAttrs = composerChannels
-          .map(
-            (ch) =>
-              `data-body-${ch}="${escapeHtml(pendById[ch].draft_body)}" data-draft-${ch}="${escapeHtml(pendById[ch].id)}" data-resend-${ch}="${resendById[ch] ? "1" : "0"}"`
-          )
+          .map((ch) => {
+            const d = pendById[ch];
+            const alt = d.alt_draft_body ? ` data-body-${ch}-alt="${escapeHtml(d.alt_draft_body)}"` : "";
+            return `data-body-${ch}="${escapeHtml(d.draft_body)}"${alt} data-draft-${ch}="${escapeHtml(d.id)}" data-resend-${ch}="${resendById[ch] ? "1" : "0"}"`;
+          })
           .join(" ");
         // Composer is collapsed by default (native <details>) so the list
         // stays dense -- staff click "Review & send" to expand it inline.
@@ -345,6 +351,10 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
                 .map((ch, i) => `<button type="button" class="chan-btn${i === 0 ? " active" : ""}" data-ch="${ch}">${ch.toUpperCase()}</button>`)
                 .join("")}</div>
               <span class="draft-hint">pick a channel &amp; edit before sending</span>
+            </div>
+            <div class="variant-toggle" role="tablist" style="${pendById[first].alt_draft_body ? "" : "display:none;"}">
+              <button type="button" class="variant-btn active" data-variant="main">Option 1</button>
+              <button type="button" class="variant-btn" data-variant="alt">Option 2</button>
             </div>
             <textarea class="draft-textarea">${escapeHtml(pendById[first].draft_body)}</textarea>
             <button class="approve-btn"${resendById[first] ? ' data-resending="1"' : ""}>${IC_SEND}<span><b class="send-verb">${resendById[first] ? "Re-send" : "Send"}</b> <b class="send-ch">${first.toUpperCase()}</b></span></button>
@@ -565,6 +575,10 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   .chan-btn:hover { color: var(--ink-2); }
   .chan-btn.active { background: #fff; color: var(--brand-ink); box-shadow: var(--sh-sm); }
   .chan-btn:disabled { opacity: .5; cursor: default; }
+  .variant-toggle { display: inline-flex; background: #eef1f4; border-radius: 8px; padding: 3px; gap: 2px; margin-bottom: 9px; }
+  .variant-btn { border: none; background: none; font-size: 11px; font-weight: 650; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; transition: all .12s; }
+  .variant-btn:hover { color: var(--ink-2); }
+  .variant-btn.active { background: #fff; color: var(--brand-ink); box-shadow: var(--sh-sm); }
   .draft-hint { font-size: 11.5px; color: var(--faint); }
   .approve-btn .send-ch { font-weight: 800; letter-spacing: .04em; }
   .draft-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; line-height: 1.5; padding: 10px 11px; border: 1px solid var(--line-2); border-radius: 9px; resize: vertical; min-height: 5.2em; margin-bottom: 9px; color: var(--ink); background: #fff; transition: border-color .12s, box-shadow .12s; }
@@ -783,17 +797,35 @@ ${
 
   document.querySelectorAll('.draft-card').forEach(function (card) {
     var chanBtns = Array.prototype.slice.call(card.querySelectorAll('.chan-btn'));
+    var variantBtns = Array.prototype.slice.call(card.querySelectorAll('.variant-btn'));
+    var variantToggle = card.querySelector('.variant-toggle');
     var textarea = card.querySelector('.draft-textarea');
     var sendCh = card.querySelector('.send-ch');
-    var editedByChannel = {};
+    // Keyed 'channel:variant' so an edit made to Option 2 isn't lost if
+    // staff flips back to Option 1 and then back again.
+    var editedByKey = {};
     var current = chanBtns.length ? chanBtns[0].dataset.ch : 'sms';
+    var currentVariant = 'main';
 
     var sendVerb = card.querySelector('.send-verb');
+    function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
     function isResend(ch) {
-      return card.dataset['resend' + ch.charAt(0).toUpperCase() + ch.slice(1)] === '1';
+      return card.dataset['resend' + cap(ch)] === '1';
+    }
+    function hasAlt(ch) {
+      return !!card.dataset['body' + cap(ch) + 'Alt'];
+    }
+    function bodyFor(ch, variant) {
+      return card.dataset['body' + cap(ch) + (variant === 'alt' ? 'Alt' : '')] || '';
     }
     function loadChannel(ch) {
-      textarea.value = editedByChannel[ch] !== undefined ? editedByChannel[ch] : (card.dataset['body' + ch.charAt(0).toUpperCase() + ch.slice(1)] || '');
+      // Switching channel always starts back on Option 1 -- Option 2 is a
+      // per-channel choice, not something that should silently carry over.
+      currentVariant = 'main';
+      variantBtns.forEach(function (b) { b.classList.toggle('active', b.dataset.variant === 'main'); });
+      if (variantToggle) variantToggle.style.display = hasAlt(ch) ? '' : 'none';
+      var key = ch + ':' + currentVariant;
+      textarea.value = editedByKey[key] !== undefined ? editedByKey[key] : bodyFor(ch, currentVariant);
       if (sendCh) sendCh.textContent = ch.toUpperCase();
       if (sendVerb) sendVerb.textContent = isResend(ch) ? 'Re-send' : 'Send';
     }
@@ -805,25 +837,35 @@ ${
         loadChannel(current);
       });
     });
-    textarea.addEventListener('input', function () { editedByChannel[current] = textarea.value; });
+    variantBtns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        variantBtns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        currentVariant = b.dataset.variant;
+        var key = current + ':' + currentVariant;
+        textarea.value = editedByKey[key] !== undefined ? editedByKey[key] : bodyFor(current, currentVariant);
+      });
+    });
+    textarea.addEventListener('input', function () { editedByKey[current + ':' + currentVariant] = textarea.value; });
 
     var btn = card.querySelector('.approve-btn');
     btn.addEventListener('click', async function () {
       var ch = current;
-      var draftId = card.dataset['draft' + ch.charAt(0).toUpperCase() + ch.slice(1)];
+      var draftId = card.dataset['draft' + cap(ch)];
       var resending = isResend(ch);
       if (resending && !confirm('Send this ' + ch.toUpperCase() + ' again? The customer has already had one.')) return;
       btn.disabled = true;
       chanBtns.forEach(function (x) { x.disabled = true; });
+      variantBtns.forEach(function (x) { x.disabled = true; });
       btn.textContent = 'Sending...';
       try {
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, resend: resending }),
+          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
         });
-        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
-      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); }
+        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
+      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
     });
   });
 
@@ -882,7 +924,15 @@ async function advanceReminderRound(env, dueCustomerId, sentRound) {
 // before sending -- when present (and non-empty after trimming) it's what
 // actually gets sent, and it's persisted onto the draft row so the record
 // reflects what really went out, not the original auto-generated wording.
-export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { resend = false } = {}) {
+//
+// variant: which option the composer's toggle had selected ('main' or
+// 'alt') when Send was clicked -- only affects the email SUBJECT. The body
+// itself is whatever's in editedBody regardless (the textarea already held
+// the alt wording, edited or not), but draft_subject/alt_draft_subject
+// aren't shown or editable in the composer at all, so the subject has to be
+// picked server-side or an Option-2 send would go out with the Option-1
+// subject line.
+export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { resend = false, variant = "main" } = {}) {
   const draft = await env.DB.prepare("SELECT * FROM reminder_drafts WHERE id = ? AND tenant_id = ?").bind(draftId, tenantId).first();
   if (!draft) throw new Error("draft not found for this tenant");
   // 'failed' is re-sendable: covers both an immediate send error and the
@@ -895,6 +945,9 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { 
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
+  // Falls back to the main subject if this draft has no alt (or the alt
+  // subject is somehow blank) -- never send with no subject at all.
+  const subject = (variant === "alt" && draft.alt_draft_subject) || draft.draft_subject;
 
   // regardingJobUuid kept (needed so the customer's reply threads back into
   // that job in ServiceM8, and for the "reply here" link ServiceM8 appends
@@ -915,7 +968,7 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { 
     } else {
       result = await sendPlatformEmail(env, tenantId, {
         to: dueCustomer.contact_email_cache,
-        subject: draft.draft_subject || "Time for your next pest treatment",
+        subject: subject || "Time for your next pest treatment",
         textBody: body,
         regardingJobUuid: dueCustomer.last_job_uuid,
       });

@@ -361,12 +361,20 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     // draft lookup must come from what SQLite actually persisted. Keyed by
     // rule.id, not the job's category -- see schema.sql's comment on why a
     // badge-based rule's "current" category can change between recomputes.
+    // job.job_description is the original booking description (NOT
+    // work_done_description -- see listNotesForJob's comment in
+    // servicem8-api.js). Used to tell apart what a badge-/category-matched
+    // job actually was when the category alone doesn't say, e.g. "Termite
+    // Management Treatment" covering both bait-station checks and
+    // inspections -- see templateForCategory below.
+    const jobDescription = job.job_description || job.description || "";
+
     const row = await env.DB.prepare(
       `INSERT INTO due_customers (
          id, tenant_id, category_config_id, servicem8_company_uuid, address_key, address_display, servicem8_category_uuid,
          last_job_uuid, last_job_number, last_completed_at, bucket, suppressed_reason, dismissed_at,
-         contact_name_cache, contact_email_cache, contact_phone_cache, last_job_notes_cache, computed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+         contact_name_cache, contact_email_cache, contact_phone_cache, last_job_notes_cache, last_job_description_cache, computed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(tenant_id, servicem8_company_uuid, address_key, category_config_id) DO UPDATE SET
          servicem8_category_uuid = excluded.servicem8_category_uuid,
          last_job_uuid = excluded.last_job_uuid,
@@ -385,6 +393,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
          contact_email_cache = CASE WHEN excluded.contact_email_cache != '' THEN excluded.contact_email_cache ELSE due_customers.contact_email_cache END,
          contact_phone_cache = CASE WHEN excluded.contact_phone_cache != '' THEN excluded.contact_phone_cache ELSE due_customers.contact_phone_cache END,
          last_job_notes_cache = CASE WHEN excluded.last_job_notes_cache != '' THEN excluded.last_job_notes_cache ELSE due_customers.last_job_notes_cache END,
+         last_job_description_cache = CASE WHEN excluded.last_job_description_cache != '' THEN excluded.last_job_description_cache ELSE due_customers.last_job_description_cache END,
          computed_at = excluded.computed_at
        RETURNING id`
     )
@@ -405,6 +414,7 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
         contact?.email || "",
         contact?.mobile || contact?.phone || "",
         jobNotes,
+        jobDescription,
         now
       )
       .first();
@@ -415,12 +425,12 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   }
 }
 
-async function insertDraftIfMissing(env, tenantId, dueCustomerId, channel, round, subject, body) {
+async function insertDraftIfMissing(env, tenantId, dueCustomerId, channel, round, subject, body, altSubject = null, altBody = null) {
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_subject, draft_body, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+    `INSERT OR IGNORE INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_subject, draft_body, alt_draft_subject, alt_draft_body, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
   )
-    .bind(randomId(), tenantId, dueCustomerId, channel, round, subject, body, Date.now())
+    .bind(randomId(), tenantId, dueCustomerId, channel, round, subject, body, altSubject, altBody, Date.now())
     .run();
 }
 
@@ -444,7 +454,7 @@ async function insertDraftIfMissing(env, tenantId, dueCustomerId, channel, round
 // covers any category without its own entry (Commercial Treatment, Wildlife
 // Control, etc.) -- these UUIDs are TCB's own live category ids, confirmed
 // 2026-08-24 via list_categories.
-const CATEGORY_UUID = {
+export const CATEGORY_UUID = {
   generalPest: "97af1d3c-07ac-4aae-8862-23184055ce5b", // Premium Pest Treatment
   rodent: "65374f33-5111-4411-976d-232fc24a43ab", // Rodent Treatment
   termiteStations: "4b0df417-bd76-44a5-b9b9-231843331c3b", // Termite Management Treatment (bait station servicing)
@@ -482,6 +492,21 @@ const REMINDER_TEMPLATES = {
     email:
       "Hi {{name}},\n\nIt's time for your annual termite inspection. Regular inspections are the best way to catch termite activity early, before it causes damage.\n\nReply to this email or give us a call to book your next appointment.",
   },
+  // Not a real category -- a second style for General Pest customers to
+  // toggle to (see secondaryTemplateFor), the same way termite's two real
+  // categories double as each other's alternate.
+  generalPestAlt: {
+    sms: "Hi {{name}}, your general pest treatment is due! Get in touch to lock in a time that suits you.",
+    emailSubject: "Your general pest treatment is due",
+    email:
+      "Hi {{name}},\n\nYour general pest treatment is due. A quick treatment now keeps pests from creeping back in.\n\nGet in touch or give us a call to arrange a time that works for you.",
+  },
+  rodentAlt: {
+    sms: "Hi {{name}}, your rodent treatment check-up is due! Get in touch to lock in a time that suits you.",
+    emailSubject: "Your rodent treatment check-up is due",
+    email:
+      "Hi {{name}},\n\nYour rodent treatment check-up is due. Staying on top of this keeps rodent activity from building back up.\n\nGet in touch or give us a call to arrange a time that works for you.",
+  },
 };
 
 // Falls back to "default" for any category without its own entry -- pulled
@@ -491,10 +516,41 @@ export function templateForCategory(templates, categoryUuid) {
   return templates[categoryUuid] || templates.default;
 }
 
+// ServiceM8's "Termite Management Treatment" category covers both bait
+// station servicing AND inspections in practice -- staff book both under it,
+// so the category UUID alone doesn't say which one a given job actually was
+// (confirmed 2026-08-25 by reading descriptions: most turned out to be
+// inspections). Rather than guess wrong and only offer one wording, default
+// to whichever the description suggests and always offer the other one too
+// (see secondaryTemplateFor) so a wrong guess is a toggle, not a mistake a
+// customer sees. Pure/testable: takes the raw category+description in,
+// no DB access.
+export function resolveCategoryUuid(categoryUuid, description) {
+  if (categoryUuid === CATEGORY_UUID.termiteStations && /inspection/i.test(description || "")) {
+    return CATEGORY_UUID.termiteInspection;
+  }
+  return categoryUuid;
+}
+
+// The second draft option staff can toggle to instead of the default --
+// termite's two categories double as each other's alternate (a wrong
+// stations/inspection guess is one click to fix); general pest and rodent
+// get a differently-styled second wording. Returns null for any category
+// with no meaningful alternate (Commercial Treatment, Wildlife Control, ...).
+export function secondaryTemplateFor(templates, categoryUuid) {
+  if (categoryUuid === CATEGORY_UUID.termiteStations) return templates[CATEGORY_UUID.termiteInspection];
+  if (categoryUuid === CATEGORY_UUID.termiteInspection) return templates[CATEGORY_UUID.termiteStations];
+  if (categoryUuid === CATEGORY_UUID.generalPest) return templates.generalPestAlt;
+  if (categoryUuid === CATEGORY_UUID.rodent) return templates.rodentAlt;
+  return null;
+}
+
 async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
-  const tmpl = templateForCategory(REMINDER_TEMPLATES, dueCustomer.servicem8_category_uuid);
+  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
+  const tmpl = templateForCategory(REMINDER_TEMPLATES, effectiveCategory);
+  const altTmpl = secondaryTemplateFor(REMINDER_TEMPLATES, effectiveCategory);
 
   // First name only in the message body -- contact_name_cache stores the
   // full name (used elsewhere for staff-facing display), but "Hi Sarah" reads
@@ -503,15 +559,29 @@ async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
 
   // A tenant-configured override (Phase 2 setup wizard) still wins for
   // everyone, same as before this change -- the category templates only
-  // kick in when no custom template has been set.
+  // kick in when no custom template has been set. A custom override has no
+  // concept of a second option, so no alt is offered when one's set.
   if (dueCustomer.contact_phone_cache) {
-    const body = signOff((settings?.sms_template || tmpl.sms).replace("{{name}}", firstName), settings);
-    await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body);
+    if (settings?.sms_template) {
+      const body = signOff(settings.sms_template.replace("{{name}}", firstName), settings);
+      await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body);
+    } else {
+      const body = signOff(tmpl.sms.replace("{{name}}", firstName), settings);
+      const altBody = altTmpl ? signOff(altTmpl.sms.replace("{{name}}", firstName), settings) : null;
+      await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body, null, altBody);
+    }
   }
   if (dueCustomer.contact_email_cache) {
-    const subject = settings?.email_subject_template || tmpl.emailSubject;
-    const body = signOff((settings?.email_body_template || tmpl.email).replace("{{name}}", firstName), settings);
-    await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, subject, body);
+    if (settings?.email_body_template) {
+      const subject = settings.email_subject_template || tmpl.emailSubject;
+      const body = signOff(settings.email_body_template.replace("{{name}}", firstName), settings);
+      await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, subject, body);
+    } else {
+      const body = signOff(tmpl.email.replace("{{name}}", firstName), settings);
+      const altSubject = altTmpl?.emailSubject || null;
+      const altBody = altTmpl ? signOff(altTmpl.email.replace("{{name}}", firstName), settings) : null;
+      await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, tmpl.emailSubject, body, altSubject, altBody);
+    }
   }
 }
 
@@ -586,6 +656,18 @@ const FOLLOWUP_TEMPLATES = {
       email:
         "Hi {{name}},\n\nJust following up on your upcoming termite inspection -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
     },
+    generalPestAlt: {
+      sms: "Hi {{name}}, your general pest treatment is coming up due -- get in touch to lock in a time!",
+      emailSubject: "Your general pest treatment is coming up due",
+      email:
+        "Hi {{name}},\n\nYour general pest treatment is coming up due. Get in touch or give us a call to arrange a time that works for you.",
+    },
+    rodentAlt: {
+      sms: "Hi {{name}}, your rodent treatment check-up is coming up due -- get in touch to lock in a time!",
+      emailSubject: "Your rodent treatment check-up is coming up due",
+      email:
+        "Hi {{name}},\n\nYour rodent treatment check-up is coming up due. Get in touch or give us a call to arrange a time that works for you.",
+    },
   },
   3: {
     default: {
@@ -618,6 +700,18 @@ const FOLLOWUP_TEMPLATES = {
       email:
         "Hi {{name}},\n\nThis is a final reminder that your termite inspection is due very soon. Regular inspections are the best way to catch termite activity early, before it causes damage.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
     },
+    generalPestAlt: {
+      sms: "Hi {{name}}, final reminder -- your general pest treatment is due very soon. Get in touch to book before it lapses!",
+      emailSubject: "Final reminder -- your general pest treatment is due",
+      email:
+        "Hi {{name}},\n\nThis is a final reminder that your general pest treatment is due very soon. Get in touch or give us a call to book before it lapses.",
+    },
+    rodentAlt: {
+      sms: "Hi {{name}}, final reminder -- your rodent treatment check-up is due very soon. Get in touch to book before it lapses!",
+      emailSubject: "Final reminder -- your rodent treatment check-up is due",
+      email:
+        "Hi {{name}},\n\nThis is a final reminder that your rodent treatment check-up is due very soon. Get in touch or give us a call to book before it lapses.",
+    },
   },
 };
 
@@ -628,14 +722,39 @@ async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMont
   if (new Date() < triggerFrom) return; // not time yet for this round
 
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
-  const tmpl = templateForCategory(FOLLOWUP_TEMPLATES[round], dueCustomer.servicem8_category_uuid);
+  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
+  const tmpl = templateForCategory(FOLLOWUP_TEMPLATES[round], effectiveCategory);
+  const altTmpl = secondaryTemplateFor(FOLLOWUP_TEMPLATES[round], effectiveCategory);
   const settings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
 
   if (dueCustomer.contact_phone_cache) {
-    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "sms", round, null, signOff(tmpl.sms.replace("{{name}}", firstName), settings));
+    const altBody = altTmpl ? signOff(altTmpl.sms.replace("{{name}}", firstName), settings) : null;
+    await insertDraftIfMissing(
+      env,
+      tenantId,
+      dueCustomer.id,
+      "sms",
+      round,
+      null,
+      signOff(tmpl.sms.replace("{{name}}", firstName), settings),
+      null,
+      altBody
+    );
   }
   if (dueCustomer.contact_email_cache) {
-    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "email", round, tmpl.emailSubject, signOff(tmpl.email.replace("{{name}}", firstName), settings));
+    const altSubject = altTmpl?.emailSubject || null;
+    const altBody = altTmpl ? signOff(altTmpl.email.replace("{{name}}", firstName), settings) : null;
+    await insertDraftIfMissing(
+      env,
+      tenantId,
+      dueCustomer.id,
+      "email",
+      round,
+      tmpl.emailSubject,
+      signOff(tmpl.email.replace("{{name}}", firstName), settings),
+      altSubject,
+      altBody
+    );
   }
 }
 
