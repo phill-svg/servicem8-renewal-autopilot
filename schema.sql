@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS due_customers (
   contact_email_cache      TEXT,
   contact_phone_cache      TEXT,
   last_job_notes_cache     TEXT, -- job.work_done_description of the triggering job -- a short teaser of the tech's own notes, shown in the dashboard
+  last_job_description_cache TEXT, -- job.job_description (the original booking description, NOT work_done_description) -- used to pick the right reminder wording, e.g. termite inspection vs bait station (migration 005)
   computed_at              INTEGER NOT NULL,
   -- Follow-up sequence state (2026-08-04): reminder_round is "the next round
   -- not yet sent" -- starts at 1 (nothing sent), becomes 2 once round 1 is
@@ -117,6 +118,13 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
   round                    INTEGER NOT NULL DEFAULT 1,
   draft_subject            TEXT,
   draft_body               TEXT NOT NULL,
+  -- A second wording staff can toggle to instead of editing from scratch
+  -- (migration 005) -- e.g. termite inspection vs bait station, or a second
+  -- style for general pest / rodents. NULL when the category has no
+  -- meaningful alternate (approveAndSendDraft falls back to draft_subject
+  -- when the alt is chosen but alt_draft_subject is NULL).
+  alt_draft_subject        TEXT,
+  alt_draft_body           TEXT,
   status                   TEXT NOT NULL DEFAULT 'pending', -- pending|approved_sending|sent|dismissed|failed
   reviewed_by_staff_uuid   TEXT,
   reviewed_at              INTEGER,
