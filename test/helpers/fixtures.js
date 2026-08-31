@@ -35,6 +35,8 @@ export function baseDraft(overrides = {}) {
     round: 1,
     draft_subject: null,
     draft_body: "hello",
+    alt_draft_subject: null,
+    alt_draft_body: null,
     status: "pending",
     created_at: 1786000000000,
     sent_at: null,
