@@ -436,9 +436,14 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
 
   // Renewal-plan tabs (3 month / 6 month / 1 year), separate from the
   // urgency tabs above -- staff asked to see each renewal cadence's jobs on
-  // its own tab rather than all cadences mixed together. Counts are across
-  // every tracked customer regardless of urgency bucket, same as "All
-  // services" in the filter dropdown.
+  // its own tab rather than all cadences mixed together. A plan tab is a VIEW
+  // of that cadence, not a narrowing of the urgency tab: counts are across
+  // every tracked customer regardless of bucket (contacted rows included),
+  // and picking one shows exactly those customers wherever they sit. Anything
+  // else and the count promises rows the click can't produce -- which is
+  // precisely what it did while the plan intersected the active urgency tab:
+  // every 3-month and 6-month customer sat in Due later, so both tabs showed
+  // a count and then an empty table.
   const planCounts = { 3: 0, 6: 0, 12: 0 };
   for (const r of dueCustomers || []) {
     if (planCounts[r.plan_months] != null) planCounts[r.plan_months]++;
@@ -628,10 +633,10 @@ ${focusBanner}
     </select>
   </div>
   <div class="tabs plan-tabs">
-    <button class="plan-btn active" data-tab-plan="">All plans</button>
-    <button class="plan-btn" data-tab-plan="3">3 month <span class="n">${planCounts[3]}</span></button>
-    <button class="plan-btn" data-tab-plan="6">6 month <span class="n">${planCounts[6]}</span></button>
-    <button class="plan-btn" data-tab-plan="12">1 year <span class="n">${planCounts[12]}</span></button>
+    <button class="plan-btn active" data-tab-plan="" data-plan-label="">All plans</button>
+    <button class="plan-btn" data-tab-plan="3" data-plan-label="3 month">3 month <span class="n">${planCounts[3]}</span></button>
+    <button class="plan-btn" data-tab-plan="6" data-plan-label="6 month">6 month <span class="n">${planCounts[6]}</span></button>
+    <button class="plan-btn" data-tab-plan="12" data-plan-label="1 year">1 year <span class="n">${planCounts[12]}</span></button>
   </div>
 </div>
 ${
@@ -640,7 +645,7 @@ ${
 <thead><tr><th>Status</th><th>Customer</th><th>Service</th><th>Last service</th><th>Next due</th><th></th></tr></thead>
 <tbody>${rows}</tbody>
 </table></div>
-<div id="empty-filtered">No customers in this view for that service.</div>`
+<div id="empty-filtered">No customers match the current filters.</div>`
     : `<div class="empty-state">Nothing due yet &mdash; once jobs carrying a renewal badge are completed, customers due for their next service will appear here.</div>`
 }
 
@@ -651,11 +656,15 @@ ${
   var activeBucket = (tabBtns.find(function (b) { return b.classList.contains('active'); }) || {}).dataset;
   activeBucket = activeBucket ? activeBucket.tabBucket : 'overdue';
 
-  // Renewal-plan tabs (3 month / 6 month / 1 year) -- a separate filter
-  // dimension from the urgency tabs above, so a plan choice narrows whichever
-  // urgency tab (or search) is active rather than replacing it.
+  // Renewal-plan tabs (3 month / 6 month / 1 year). Like searching, a plan
+  // choice looks across every bucket rather than narrowing the active urgency
+  // tab -- the tab counts are whole-queue counts, so anything narrower would
+  // show a count and then no rows. bucketBeforePlan is the urgency view to
+  // return to when the plan filter is cleared.
   var planBtns = Array.prototype.slice.call(document.querySelectorAll('.plan-btn'));
   var activePlan = '';
+  var activePlanLabel = '';
+  var bucketBeforePlan = activeBucket;
 
   var emptyFiltered = document.getElementById('empty-filtered');
   var searchBox = document.getElementById('search-box');
@@ -672,7 +681,7 @@ ${
     allRows.forEach(function (row) {
       // While searching, look across ALL buckets/tabs so a name can be found
       // wherever the customer sits; otherwise filter by the active tab.
-      var bucketMatch = (q || focusCompany) ? true : row.dataset.bucket === activeBucket;
+      var bucketMatch = (q || focusCompany || activePlan) ? true : row.dataset.bucket === activeBucket;
       var serviceMatch = !serviceValue || row.dataset.service === serviceValue;
       var planMatch = !activePlan || row.dataset.plan === activePlan;
       var searchMatch = !q || (row.dataset.name || '').indexOf(q) !== -1;
@@ -688,6 +697,11 @@ ${
     } else if (q) {
       noun = visibleCount === 1 ? ' match for \\u201c' + q + '\\u201d' : ' matches for \\u201c' + q + '\\u201d';
       document.getElementById('sub-count').textContent = visibleCount + noun;
+    } else if (activePlan) {
+      // Not "due for renewal" -- a plan view spans every bucket, so it
+      // includes customers already contacted and ones not due for months.
+      noun = visibleCount === 1 ? ' customer on the ' : ' customers on the ';
+      document.getElementById('sub-count').textContent = visibleCount + noun + activePlanLabel + ' plan' + (serviceValue ? ' \\u2014 ' + serviceValue : '');
     } else {
       noun = activeBucket.indexOf('contacted') === 0 ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
       document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' \\u2014 ' + serviceValue : '');
@@ -744,14 +758,32 @@ ${
 
   var contactedSelect = document.getElementById('contacted-select');
 
+  // Shows which urgency view is in charge, in the tab strip and the Contacted
+  // dropdown together -- one place, so restoring a view after a plan filter
+  // can't drift from what clicking the tab itself does. Pass '' for "none of
+  // them", which is the state while a plan view spans every bucket.
+  function showBucketUi(bucket) {
+    tabBtns.forEach(function (b) { b.classList.toggle('active', b.dataset.tabBucket === bucket); });
+    var isContacted = bucket.indexOf('contacted') === 0;
+    contactedSelect.value = isContacted ? bucket : '';
+    contactedSelect.classList.toggle('active', isContacted);
+  }
+
+  // Any deliberate move to an urgency view also leaves the plan view, for the
+  // same reason it leaves the single-client view: a plan spans buckets, so a
+  // tab clicked underneath one would appear to do nothing.
+  function clearPlan() {
+    activePlan = '';
+    activePlanLabel = '';
+    planBtns.forEach(function (b) { b.classList.toggle('active', !b.dataset.tabPlan); });
+  }
+
   tabBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
       clearFocus();
-      tabBtns.forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      contactedSelect.value = '';
-      contactedSelect.classList.remove('active');
+      clearPlan();
       activeBucket = btn.dataset.tabBucket;
+      showBucketUi(activeBucket);
       applyFilters();
     });
   });
@@ -761,7 +793,16 @@ ${
       clearFocus();
       planBtns.forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      activePlan = btn.dataset.tabPlan;
+      var next = btn.dataset.tabPlan;
+      if (!activePlan && next) bucketBeforePlan = activeBucket;
+      // No urgency tab is in charge while a plan is selected, so LEAVING a
+      // plan hands control back to whichever one had it. Guarded on leaving,
+      // not on "no plan set" -- otherwise clicking the already-active "All
+      // plans" would yank the view back to the tab you started the session on.
+      if (activePlan && !next) activeBucket = bucketBeforePlan;
+      activePlan = next;
+      activePlanLabel = btn.dataset.planLabel || '';
+      showBucketUi(activePlan ? '' : activeBucket);
       applyFilters();
     });
   });
@@ -772,9 +813,9 @@ ${
   contactedSelect.addEventListener('change', function () {
     if (!contactedSelect.value) return;
     clearFocus();
-    tabBtns.forEach(function (b) { b.classList.remove('active'); });
-    contactedSelect.classList.add('active');
+    clearPlan();
     activeBucket = contactedSelect.value;
+    showBucketUi(activeBucket);
     applyFilters();
   });
 
