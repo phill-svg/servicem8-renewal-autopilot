@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, deleteBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -29,10 +29,32 @@ export const RENEWAL_BADGES = [
   { name: "1 year auto", file: "phill-1year-v9.png", intervalMonths: 12 },
 ];
 
+// Badge names are matched normalized (trimmed, case-insensitive) rather than
+// byte-exact: ServiceM8 keeps whatever case a badge was hand-made with, and a
+// near-miss match is precisely what makes the sync create a second badge
+// beside the real one instead of reusing it.
+function badgeKey(name) {
+  return (name || "").trim().toLowerCase();
+}
+
+// ServiceM8 allows two badges with the same name, so an account can end up
+// holding several "6 month auto" records (TCB's did -- see
+// ensureRenewalBadges). The canonical one is the oldest: ServiceM8 badge
+// UUIDs are time-ordered, so the lowest-sorting uuid is the first created,
+// which for a running account is also the uuid category_config's tracking
+// rules and every already-badged job point at. Preferring it means the sync
+// never quietly moves tracking onto a newer orphan.
+function matchesForName(existingBadges, name) {
+  return (existingBadges || [])
+    .filter((b) => badgeKey(b.name) === badgeKey(name))
+    .sort((a, b) => String(a.uuid).localeCompare(String(b.uuid)));
+}
+
 // Pure planning step, split out from ensureRenewalBadges for testing without
 // a live account: decides which RENEWAL_BADGES need creating (no existing
-// badge with that exact name) vs. re-fetching (a badge with that name exists,
-// but its stored file_name doesn't match the URL we'd create it with today).
+// badge with that name) vs. re-fetching (a badge with that name exists, but
+// its stored file_name doesn't match the URL we'd create it with today) vs.
+// are surplus duplicates of one we already have.
 // ServiceM8 copies/caches the image at the file_name URL rather than
 // proxying it live, so a badge created (or last refreshed) against a
 // since-changed sprite -- e.g. the v9 gray/yellow/green recolor -- silently
@@ -40,19 +62,21 @@ export const RENEWAL_BADGES = [
 // file_name. /debug/update-badge-images (see src/index.js) does this
 // on demand; the sweep below does it automatically so nobody has to run it.
 export function planBadgeSync(existingBadges, renewalBadges, origin) {
-  const existingByName = new Map((existingBadges || []).map((b) => [b.name, b]));
   const toCreate = [];
   const toRefresh = [];
+  const duplicates = [];
   for (const { name, file } of renewalBadges) {
     const fileUrl = `${origin}/assets/images/${file}`;
-    const existing = existingByName.get(name);
-    if (!existing) {
+    const matches = matchesForName(existingBadges, name);
+    if (!matches.length) {
       toCreate.push({ name, fileUrl });
-    } else if (existing.file_name !== fileUrl) {
-      toRefresh.push({ name, uuid: existing.uuid, fileUrl });
+      continue;
     }
+    const [canonical, ...extras] = matches;
+    if (canonical.file_name !== fileUrl) toRefresh.push({ name, uuid: canonical.uuid, fileUrl });
+    for (const extra of extras) duplicates.push({ name, uuid: extra.uuid, canonicalUuid: canonical.uuid });
   }
-  return { toCreate, toRefresh };
+  return { toCreate, toRefresh, duplicates };
 }
 
 // Idempotent -- safe to run on every install AND on a recurring sweep (see
@@ -61,36 +85,97 @@ export function planBadgeSync(existingBadges, renewalBadges, origin) {
 // { name: uuid } map of all Renewal badges now present. Does NOT wire a
 // tracking rule -- that's the setup wizard's job (the business picks which
 // cadence to track and confirms the interval/templates).
-export async function ensureRenewalBadges(env, tenantId, origin) {
-  let existing = [];
+//
+// `api` is injectable purely so the failure path below is testable without a
+// live account; callers use the default.
+export async function ensureRenewalBadges(env, tenantId, origin, api = { listBadges, createBadge, updateBadge }) {
+  let existing;
   try {
-    existing = (await listBadges(env, tenantId)) || [];
+    existing = (await api.listBadges(env, tenantId)) || [];
   } catch (err) {
-    console.error(`ensureRenewalBadges: failed to list badges for tenant ${tenantId}`, err);
+    // Bail out completely instead of continuing with an empty list. A failed
+    // read used to be indistinguishable from "this account has no badges
+    // yet", so one rate-limited (429) or 5xx list call was enough for the
+    // creation loop below to mint a second "6 month auto" next to the real
+    // one. That is exactly what happened live on 2026-09-07: three orphan
+    // duplicates appeared in TCB's account, none of them the uuid the
+    // tracking rules reference, so any job staff badged with one was
+    // invisible to the due engine. Creating nothing is always recoverable --
+    // the next run retries -- while creating a duplicate needs a repair pass
+    // (see dedupeRenewalBadges).
+    console.error(`ensureRenewalBadges: failed to list badges for tenant ${tenantId} -- skipping this run rather than creating duplicates`, err);
+    return {};
   }
 
   const uuidByName = {};
-  for (const b of existing) {
-    if (RENEWAL_BADGES.some((r) => r.name === b.name)) uuidByName[b.name] = b.uuid;
+  for (const { name } of RENEWAL_BADGES) {
+    const [canonical] = matchesForName(existing, name);
+    if (canonical) uuidByName[name] = canonical.uuid;
   }
 
-  const { toCreate, toRefresh } = planBadgeSync(existing, RENEWAL_BADGES, origin);
+  const { toCreate, toRefresh, duplicates } = planBadgeSync(existing, RENEWAL_BADGES, origin);
 
   for (const { name, fileUrl } of toCreate) {
     try {
-      uuidByName[name] = await createBadge(env, tenantId, { name, fileUrl });
+      uuidByName[name] = await api.createBadge(env, tenantId, { name, fileUrl });
     } catch (err) {
       console.error(`ensureRenewalBadges: failed to create badge "${name}" for tenant ${tenantId}`, err);
     }
   }
   for (const { name, uuid, fileUrl } of toRefresh) {
     try {
-      await updateBadge(env, tenantId, uuid, { fileUrl });
+      await api.updateBadge(env, tenantId, uuid, { fileUrl });
     } catch (err) {
       console.error(`ensureRenewalBadges: failed to refresh image for badge "${name}" (tenant ${tenantId})`, err);
     }
   }
+  // Surfaced, not silently cleaned up: retiring a badge also moves whatever
+  // jobs carry it, which is /debug/dedupe-badges' job, not a sweep's.
+  if (duplicates.length) {
+    console.warn(`ensureRenewalBadges: tenant ${tenantId} has duplicate renewal badges -- run /debug/dedupe-badges`, duplicates);
+  }
   return uuidByName;
+}
+
+// Repair pass for an account that already carries duplicates from the old
+// list-failure fallback. Pure planning step so "which jobs move where" is
+// testable without a live account: every job carrying a duplicate badge is
+// rewritten onto the canonical uuid, keeping its other badges untouched, and
+// a job already carrying both ends up with one copy (the Set). Jobs move
+// before the duplicates are retired, so no job is left pointing at a
+// deactivated badge.
+export function planBadgeDedupe(existingBadges, renewalBadges, jobsList, origin) {
+  const { duplicates } = planBadgeSync(existingBadges, renewalBadges, origin);
+  const canonicalByDupe = new Map(duplicates.map((d) => [d.uuid, d.canonicalUuid]));
+  const jobUpdates = [];
+  for (const job of jobsList || []) {
+    const badges = parseBadges(job.badges);
+    if (!badges.some((uuid) => canonicalByDupe.has(uuid))) continue;
+    jobUpdates.push({
+      jobUuid: job.uuid,
+      badges: [...new Set(badges.map((uuid) => canonicalByDupe.get(uuid) || uuid))],
+    });
+  }
+  return { duplicates, jobUpdates };
+}
+
+// Dry run unless apply is set -- the caller (/debug/dedupe-badges) shows the
+// plan first, since this both rewrites jobs and retires badge records.
+// deleteBadge is ServiceM8's soft delete (active=0): the duplicate vanishes
+// from the Job Badges list without destroying history.
+export async function dedupeRenewalBadges(env, tenantId, origin, { apply = false } = {}) {
+  const existing = (await listBadges(env, tenantId)) || [];
+  const jobs = (await listAllJobsAnyStatus(env, tenantId)) || [];
+  const { duplicates, jobUpdates } = planBadgeDedupe(existing, RENEWAL_BADGES, jobs, origin);
+  if (!apply) return { mode: "dry-run", duplicates, jobUpdates };
+
+  for (const { jobUuid, badges } of jobUpdates) {
+    await updateJobBadges(env, tenantId, jobUuid, badges);
+  }
+  for (const { uuid } of duplicates) {
+    await deleteBadge(env, tenantId, uuid);
+  }
+  return { mode: "applied", duplicates, jobUpdates };
 }
 
 // One-off legacy-badge migration: "1 Year Follow-up" predates "1 year auto"

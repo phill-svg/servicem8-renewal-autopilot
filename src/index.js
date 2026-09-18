@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge, parseBadges } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, dedupeRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
 
@@ -224,6 +224,39 @@ const NIGHTLY_CRON = "0 16 * * *";
 const PRODUCTION_ORIGIN = "https://renewal-autopilot.phill-abb.workers.dev";
 
 async function runNightlyReconciliation(env) {
+  // Keep each tenant's Renewal badges in sync with RENEWAL_BADGES -- not just
+  // present at install time. ensureRenewalBadges only sets a badge's image
+  // when it's first created, so a later sprite change (like the v9
+  // gray/yellow/green recolor) would otherwise never reach a tenant whose
+  // badges already existed under those names, without someone manually
+  // running /debug/update-badge-images.
+  //
+  // Nightly, not on the 2-minute sweep it used to ride: in steady state this
+  // is a no-op, so 720 list calls a day per tenant bought nothing but 720
+  // chances for a rate-limited read -- and a failed read used to create a
+  // duplicate badge (see ensureRenewalBadges). Runs before the per-tenant
+  // reconciliation below so reassignBadgesForTenant sees the badges.
+  const { results: badgeSyncTenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
+  for (const { servicem8_account_uuid } of badgeSyncTenants || []) {
+    try {
+      await ensureRenewalBadges(env, servicem8_account_uuid, PRODUCTION_ORIGIN);
+    } catch (err) {
+      console.error(`badge sync sweep failed for tenant ${servicem8_account_uuid}`, err);
+    }
+    // PAUSED 2026-08-24: this added "1 year auto" to every job carrying
+    // "1 Year Follow-up" indiscriminately -- no dedup to the latest job per
+    // property (the actual badge hand-off semantics group by company+address
+    // and pick the single latest non-warranty completed job -- see
+    // planBadgeMoves), and it never removed "1 Year Follow-up" either. Live
+    // data may already have been touched by this before it was caught;
+    // re-enable only once replaced with logic that mirrors planBadgeMoves.
+    try {
+      // await migrateLegacyFollowUpBadges(env, servicem8_account_uuid);
+    } catch (err) {
+      console.error(`legacy badge migration failed for tenant ${servicem8_account_uuid}`, err);
+    }
+  }
+
   const { results: tenants } = await env.DB.prepare("SELECT * FROM tenants WHERE status = 'active'").all();
   for (const tenant of tenants || []) {
     const runId = randomId();
@@ -285,35 +318,6 @@ async function runBackfillAndRefreshSweep(env) {
   // send response alone doesn't prove that (see verifyDeliveries). Cheap in
   // steady state: two D1 queries per tenant unless unverified sends exist.
   await verifyDeliveries(env);
-
-  // Keep each tenant's Renewal badges in sync with RENEWAL_BADGES -- not
-  // just present at install time. ensureRenewalBadges only sets a badge's
-  // image when it's first created, so a later sprite change (like the v9
-  // gray/yellow/green recolor) would otherwise never reach a tenant whose
-  // badges already existed under those names, without someone manually
-  // running /debug/update-badge-images. This sweep does it automatically;
-  // a badge already in sync is a no-op (see ensureRenewalBadges), so it's
-  // cheap in steady state.
-  const { results: activeTenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
-  for (const { servicem8_account_uuid } of activeTenants || []) {
-    try {
-      await ensureRenewalBadges(env, servicem8_account_uuid, PRODUCTION_ORIGIN);
-    } catch (err) {
-      console.error(`badge sync sweep failed for tenant ${servicem8_account_uuid}`, err);
-    }
-    // PAUSED 2026-08-24: this added "1 year auto" to every job carrying
-    // "1 Year Follow-up" indiscriminately -- no dedup to the latest job per
-    // property (the actual badge hand-off semantics group by company+address
-    // and pick the single latest non-warranty completed job -- see
-    // planBadgeMoves), and it never removed "1 Year Follow-up" either. Live
-    // data may already have been touched by this before it was caught;
-    // re-enable only once replaced with logic that mirrors planBadgeMoves.
-    try {
-      // await migrateLegacyFollowUpBadges(env, servicem8_account_uuid);
-    } catch (err) {
-      console.error(`legacy badge migration failed for tenant ${servicem8_account_uuid}`, err);
-    }
-  }
 }
 
 // ---- ServiceM8 Add-on: job-card button -> standalone dashboard -----------
@@ -676,6 +680,25 @@ async function handleDebugUpdateBadgeImages(request, env) {
   }
 }
 
+// Cleans up duplicate renewal badges in a tenant's account: moves every job
+// off a duplicate onto the canonical (oldest, rule-referenced) badge of the
+// same name, then retires the duplicates. Dry run by default; ?apply=1 to
+// actually write. Needed for accounts touched before ensureRenewalBadges
+// stopped treating a failed badge list as "no badges exist".
+async function handleDebugDedupeBadges(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const url = new URL(request.url);
+  const tenantId = url.searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  const apply = url.searchParams.get("apply") === "1";
+
+  try {
+    return json(await dedupeRenewalBadges(env, tenantId, url.origin, { apply }));
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 // Configures a tracking rule -- either signalType "category" (categoryUuid)
 // or "badge" (badgeUuid). No DB-level unique constraint on the target uuid
 // since a tenant may have several rules of either kind; upsert is done by
@@ -833,6 +856,7 @@ export default {
     if (pathname === "/debug/rekey-addresses" && method === "GET") return handleDebugRekeyAddresses(request, env);
     if (pathname === "/debug/categories" && method === "GET") return handleDebugCategories(request, env);
     if (pathname === "/debug/update-badge-images" && method === "GET") return handleDebugUpdateBadgeImages(request, env);
+    if (pathname === "/debug/dedupe-badges" && method === "GET") return handleDebugDedupeBadges(request, env);
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
