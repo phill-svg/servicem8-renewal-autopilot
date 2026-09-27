@@ -19,6 +19,12 @@ const STYLE = {
   call: { accent: "#7c3aed", bg: "#faf5ff", pillBg: "#ede9fe", pillFg: "#5b21b6", label: "Call customer" },
 };
 
+// JSON for embedding inside an inline <script>: JSON.stringify alone leaves
+// "</script>" intact, which would end the script block early.
+function scriptJson(v) {
+  return JSON.stringify(v).replace(/</g, "\\u003c");
+}
+
 // Contact fields hold things like "61403232912,0403232912" (two numbers in
 // one field) or "0410414736 husband". Stripping non-digits alone dialled the
 // two numbers concatenated, so this shares the SMS sender's normalizer.
@@ -710,7 +716,7 @@ ${
   // Set when opened from a Client card. Like searching, it spans every bucket
   // -- the point is to see everything tracked for that client, whichever tab
   // each row would normally live in.
-  var focusCompany = ${JSON.stringify(focusActive ? focusCompanyUuid : "")};
+  var focusCompany = ${scriptJson(focusActive ? focusCompanyUuid : "")};
 
   function applyFilters() {
     var serviceValue = filterSelect.value;
@@ -927,7 +933,7 @@ ${
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
+          body: JSON.stringify({ token: ${scriptJson(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
@@ -942,7 +948,7 @@ ${
         const res = await fetch('/dashboard/called', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, dueCustomerId: btn.dataset.called }),
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: btn.dataset.called }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
@@ -957,7 +963,7 @@ ${
         const res = await fetch('/dashboard/dismiss', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, dueCustomerId: rowId }),
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: rowId }),
         });
         if (res.ok) {
           var row = document.querySelector('tr[data-row-id="' + rowId + '"]');
@@ -1030,6 +1036,16 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { 
   // closing off the channel -- while a double-clicked button still can't.
   const reSendable = draft.status === "pending" || draft.status === "failed" || (resend && draft.status === "sent");
   if (!reSendable) return; // already actioned -- idempotent
+
+  // Atomic claim before sending: two tabs (or two staff) clicking Send at the
+  // same moment both passed the status check above and both sent. Only the
+  // request whose UPDATE actually flips the status gets to send.
+  const claim = await env.DB.prepare(
+    `UPDATE reminder_drafts SET status = 'approved_sending' WHERE id = ? AND status = ? AND status IN ('pending', 'failed', 'sent')`
+  )
+    .bind(draftId, draft.status)
+    .run();
+  if (!claim?.meta?.changes) return; // someone else claimed it first
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;

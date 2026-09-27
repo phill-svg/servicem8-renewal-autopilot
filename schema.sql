@@ -148,6 +148,11 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_reminder_drafts_tenant_status ON reminder_drafts(tenant_id, status);
 
+-- Previous cycles' drafts (migration 006): moved here when a customer is
+-- serviced again, so the new cycle can create fresh round-1 drafts. Same
+-- columns as reminder_drafts, no constraints.
+CREATE TABLE IF NOT EXISTS reminder_drafts_archive AS SELECT * FROM reminder_drafts WHERE 0;
+
 -- Per-tenant notification/messaging preferences, set in the setup wizard.
 CREATE TABLE IF NOT EXISTS tenant_settings (
   tenant_id              TEXT PRIMARY KEY REFERENCES tenants(servicem8_account_uuid),
