@@ -383,7 +383,28 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   for (const [, { job, completedAt, addressKey }] of groups) {
     const dueDate = addMonths(completedAt, rule.interval_months);
     const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days, rule.overdue_max_days, rule.due_later_lead_days);
-    if (!bucket) continue; // not due yet -- don't create noise rows for every customer, only actionable ones
+
+    const existing = await env.DB.prepare(
+      `SELECT id, last_completed_at FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ?`
+    )
+      .bind(tenantId, job.company_uuid, addressKey, rule.id)
+      .first();
+    const existingAt = existing ? parseServiceM8Date(existing.last_completed_at) : null;
+    // Never move a customer BACKWARDS: a backfill chunk only sees older
+    // history, and its "latest" job must not overwrite a newer service.
+    if (existingAt && completedAt < existingAt) continue;
+
+    if (!bucket) {
+      // No longer actionable -- serviced again (not due for months) or past
+      // overdue_max_days. Leaving the row meant staff could still text
+      // "you're due" to someone serviced last week. It comes back fresh, at
+      // round 1, once the new cycle is actually due.
+      if (existing) await retireDueCustomer(env, existing.id);
+      continue;
+    }
+    // A newer service while still in a bucket (e.g. a 3-month plan): the old
+    // cycle's reminders and call status no longer apply -- start over.
+    if (existingAt && completedAt > existingAt) await startNewReminderCycle(env, existing.id);
 
     let suppressedReason = null;
     try {
@@ -1001,15 +1022,41 @@ async function reassignBadgeForRule(env, tenantId, rule, jobs, warrantyCategoryU
   return moved;
 }
 
-// The customer was serviced, so any unsent reminder from the old cycle is now
+// The customer was serviced, so any reminder from the old cycle is now
 // wrong -- left in the queue, a staff member could send "your treatment is
-// due" to someone serviced last week. Superseded drafts match none of the
-// dashboard's pending/failed/sent filters, so they leave the queue while
-// staying auditable.
+// due" to someone serviced last week. The old drafts are archived (still
+// auditable) and the sequence restarts at round 1.
 //
 // The due_customers row is found by its natural key, which is exactly the
-// grouping key already in hand. dismissed_at needs no handling: the upsert
-// clears it automatically once last_completed_at moves forward.
+// grouping key already in hand.
+// Moves a customer's drafts into reminder_drafts_archive (kept for audit) and
+// out of reminder_drafts, so UNIQUE(due_customer_id, channel, round) no
+// longer blocks the new cycle's round-1 draft. Before this, last year's sent
+// round-1 draft silently stopped this year's from ever being created.
+function archiveDraftsStatements(env, dueCustomerId) {
+  return [
+    env.DB.prepare("INSERT INTO reminder_drafts_archive SELECT * FROM reminder_drafts WHERE due_customer_id = ?").bind(dueCustomerId),
+    env.DB.prepare("DELETE FROM reminder_drafts WHERE due_customer_id = ?").bind(dueCustomerId),
+  ];
+}
+
+// The customer was serviced again: wipe the old chase (drafts, round, call
+// status) so the new cycle starts clean at round 1.
+async function startNewReminderCycle(env, dueCustomerId) {
+  await env.DB.batch([
+    ...archiveDraftsStatements(env, dueCustomerId),
+    env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL, dismissed_at = NULL WHERE id = ?").bind(dueCustomerId),
+  ]);
+}
+
+// Drops a no-longer-actionable customer from the queue entirely.
+async function retireDueCustomer(env, dueCustomerId) {
+  await env.DB.batch([
+    ...archiveDraftsStatements(env, dueCustomerId),
+    env.DB.prepare("DELETE FROM due_customers WHERE id = ?").bind(dueCustomerId),
+  ]);
+}
+
 async function resetReminderSequenceForGroup(env, tenantId, rule, move) {
   const row = await env.DB.prepare(
     `SELECT id FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ?`
@@ -1017,10 +1064,7 @@ async function resetReminderSequenceForGroup(env, tenantId, rule, move) {
     .bind(tenantId, move.companyUuid, move.addressKey, rule.id)
     .first();
   if (!row) return; // not tracked yet -- the recompute that follows will create it against the new date
-  await env.DB.prepare("UPDATE reminder_drafts SET status = 'superseded' WHERE due_customer_id = ? AND status = 'pending'")
-    .bind(row.id)
-    .run();
-  await env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL WHERE id = ?").bind(row.id).run();
+  await startNewReminderCycle(env, row.id);
 }
 
 // Runs on the nightly cron immediately before the recompute, so the recompute

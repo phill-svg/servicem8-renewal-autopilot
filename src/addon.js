@@ -89,7 +89,11 @@ export async function createDashboardToken(secret, tenantId) {
 // Returns the tenant id the token was issued for, or null if invalid/expired.
 export async function verifyDashboardToken(secret, token) {
   if (!token) return null;
-  const [tenantId, expiryStr, sig] = String(token).split(".");
+  // Exactly three parts: extra dot-separated junk used to pass verification
+  // and then got echoed raw into the dashboard's <script> block.
+  const parts = String(token).split(".");
+  if (parts.length !== 3) return null;
+  const [tenantId, expiryStr, sig] = parts;
   const expiry = Number(expiryStr);
   if (!tenantId || !expiry || !sig || expiry < Date.now()) return null;
   const expected = toHex(await hmacSha256(secret, `${tenantId}.${expiryStr}`));

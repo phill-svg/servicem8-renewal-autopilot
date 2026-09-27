@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS due_customers (
   -- -- no separate "cancelled" state needed.
   reminder_round           INTEGER NOT NULL DEFAULT 1,
   last_reminder_sent_at    INTEGER,
+  -- Step 4 (migration 006): after round 3 is sent the row moves to the
+  -- dashboard's "Call customer" tab; called_at is set by "Mark called".
+  called_at                INTEGER,
   UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);
@@ -144,6 +147,11 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
   UNIQUE(due_customer_id, channel, round)
 );
 CREATE INDEX IF NOT EXISTS idx_reminder_drafts_tenant_status ON reminder_drafts(tenant_id, status);
+
+-- Previous cycles' drafts (migration 006): moved here when a customer is
+-- serviced again, so the new cycle can create fresh round-1 drafts. Same
+-- columns as reminder_drafts, no constraints.
+CREATE TABLE IF NOT EXISTS reminder_drafts_archive AS SELECT * FROM reminder_drafts WHERE 0;
 
 -- Per-tenant notification/messaging preferences, set in the setup wizard.
 CREATE TABLE IF NOT EXISTS tenant_settings (

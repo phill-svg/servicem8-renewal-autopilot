@@ -16,7 +16,14 @@ const STYLE = {
   due_soon: { accent: "#d97706", bg: "#fffcf3", pillBg: "#fef3c7", pillFg: "#92400e", label: "Due soon" },
   due_later: { accent: "#2563eb", bg: "#f4f8ff", pillBg: "#dbeafe", pillFg: "#1e40af", label: "Due later" },
   contacted: { accent: "#64748b", bg: "#f7f8fa", pillBg: "#e2e8f0", pillFg: "#334155", label: "Contacted" },
+  call: { accent: "#7c3aed", bg: "#faf5ff", pillBg: "#ede9fe", pillFg: "#5b21b6", label: "Call customer" },
 };
+
+// JSON for embedding inside an inline <script>: JSON.stringify alone leaves
+// "</script>" intact, which would end the script block early.
+function scriptJson(v) {
+  return JSON.stringify(v).replace(/</g, "\\u003c");
+}
 
 // Contact fields hold things like "61403232912,0403232912" (two numbers in
 // one field) or "0410414736 husband". Stripping non-digits alone dialled the
@@ -130,6 +137,20 @@ function dueChipText(days) {
 // page lands showing just that client's renewals (across every bucket) with a
 // one-click way back to the full list. Ignored when the client has no tracked
 // renewals -- a banner says so rather than presenting an empty table.
+// Step 4 of the chase: all three reminders have gone out with no booking, so
+// the next move is a phone call. Until "Mark called" is clicked the row sits
+// in the "Call customer" tab with a tap-to-call button; afterwards it moves
+// to "Called" under the Contacted dropdown, showing when.
+function callCustomerBlock(r) {
+  if (r.called_at) {
+    return `<div class="sent-row"><span class="called-chip" title="Marked as called ${escapeHtml(formatEpochAu(r.called_at, AU_DATETIME_FMT))} (${escapeHtml(agoText(r.called_at))})">${IC_PHONE}Called ${escapeHtml(formatEpochAu(r.called_at))}</span></div>`;
+  }
+  const callBtn = r.contact_phone_cache
+    ? `<a href="${telHref(r.contact_phone_cache)}" class="call-btn">${IC_PHONE}Call customer</a>`
+    : `<span class="next-chip warn" title="No phone number on file -- add one in ServiceM8, or dismiss the row.">&#9888; No phone number to call</span>`;
+  return `<div class="sent-row call-row" title="All three reminders have been sent with no booking yet -- give them a call.">${callBtn}<button type="button" class="called-btn" data-called="${escapeHtml(r.id)}">&#10003; Mark called</button></div>`;
+}
+
 // What happens next for a customer who has already been contacted. Rounds 2
 // and 3 are auto-DRAFTED by the nightly cron and then wait for a human to
 // approve them -- so this says "drafts", never "sends". Claiming otherwise
@@ -140,9 +161,7 @@ function dueChipText(days) {
 // silent permanently unless someone notices -- hence the warning variant,
 // which is as much the point of this chip as the date is.
 function nextReminderChip(r, intervalMonths) {
-  if ((r.reminder_round || 1) >= 4) {
-    return `<div class="sent-row"><span class="next-chip warn" title="All three reminders have been sent. Nothing further is scheduled for this customer -- chase them by hand, or dismiss the row.">&#9888; Final reminder sent &mdash; nothing further scheduled</span></div>`;
-  }
+  if ((r.reminder_round || 1) >= 4) return callCustomerBlock(r);
   const at = nextFollowUpDraftDate(r, intervalMonths);
   if (!at) return "";
   const days = Math.round((at.getTime() - Date.now()) / 86400000);
@@ -371,9 +390,12 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       // pending again, so they automatically move BACK into their urgency
       // bucket to be actioned -- then to Contacted N+1 once sent, and so on.
       const contactedRound = Math.min(Math.max((r.reminder_round || 1) - 1, 1), 3);
-      const tabBucket = alreadyContacted ? `contacted${contactedRound}` : r.bucket;
-      const s = alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
-      const statusLabel = alreadyContacted ? `Contacted ${contactedRound}` : s.label;
+      // Step 4: every reminder is used up, so the row becomes a call task --
+      // its own tab until staff mark it called, then "Called" under Contacted.
+      const needsCall = alreadyContacted && (r.reminder_round || 1) >= 4;
+      const tabBucket = needsCall ? (r.called_at ? "called" : "call") : alreadyContacted ? `contacted${contactedRound}` : r.bucket;
+      const s = needsCall && !r.called_at ? STYLE.call : alreadyContacted ? STYLE.contacted : STYLE[r.bucket] || STYLE.due_soon;
+      const statusLabel = needsCall ? (r.called_at ? "Called" : STYLE.call.label) : alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
       const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-plan="${escapeHtml(r.plan_months ? String(r.plan_months) : "")}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}" style="--accent:${s.accent};--rowbg:${s.bg};">
@@ -418,7 +440,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
 
   // Counts per tab, derived from each row's assigned tabBucket -- one source
   // of truth so the tab labels and the actual filtered rows can never drift.
-  const counts = { overdue: 0, due: 0, due_soon: 0, due_later: 0, contacted1: 0, contacted2: 0, contacted3: 0 };
+  const counts = { call: 0, overdue: 0, due: 0, due_soon: 0, due_later: 0, contacted1: 0, contacted2: 0, contacted3: 0, called: 0 };
   allRowsData.forEach((r) => (counts[r.tabBucket] = (counts[r.tabBucket] || 0) + 1));
 
   const rows = allRowsData.map((r) => r.html).join("\n");
@@ -438,8 +460,8 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   // Default-active tab is always one of the four urgency buckets (the
   // Contacted stages live in a dropdown, not the tab strip, so they never
   // start selected) -- first non-empty in urgency order, else Overdue.
-  const defaultBucket = ["overdue", "due", "due_soon", "due_later"].find((b) => counts[b] > 0) || "overdue";
-  const actionableCount = counts.overdue + counts.due + counts.due_soon + counts.due_later;
+  const defaultBucket = ["overdue", "due", "call", "due_soon", "due_later"].find((b) => counts[b] > 0) || "overdue";
+  const actionableCount = counts.overdue + counts.due + counts.call + counts.due_soon + counts.due_later;
 
   const serviceNames = [...new Set((dueCustomers || []).map((r) => r.service_name))].sort();
   const filterOptions = serviceNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
@@ -566,6 +588,12 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   /* The sequence has run out: this customer will never be contacted again
      unless a human acts, so it earns a warning colour. */
   .next-chip.warn { color: #92400e; background: #fef3c7; border-color: #fde68a; }
+  .call-row { gap: 6px; }
+  .call-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #fff; background: #7c3aed; border-radius: 8px; padding: 6px 12px; text-decoration: none; box-shadow: 0 1px 2px rgba(91,33,182,.35); }
+  .call-btn:hover { background: #6d28d9; }
+  .called-btn { font-size: 12px; font-weight: 650; color: #5b21b6; background: #fff; border: 1px solid #ddd6fe; border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+  .called-btn:hover:not(:disabled) { background: #f5f3ff; }
+  .called-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: #5b21b6; background: #ede9fe; border: 1px solid #ddd6fe; border-radius: 999px; padding: 3px 10px; }
   .next-chip.warn .ic { color: #b45309; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
@@ -626,6 +654,7 @@ ${focusBanner}
   <div class="tabs">
     <button class="tab-btn${defaultBucket === "overdue" ? " active" : ""}" data-tab-bucket="overdue">Overdue <span class="n">${counts.overdue}</span></button>
     <button class="tab-btn${defaultBucket === "due" ? " active" : ""}" data-tab-bucket="due">Due now <span class="n">${counts.due}</span></button>
+    <button class="tab-btn${defaultBucket === "call" ? " active" : ""}" data-tab-bucket="call">Call customer <span class="n">${counts.call}</span></button>
     <button class="tab-btn${defaultBucket === "due_soon" ? " active" : ""}" data-tab-bucket="due_soon">Due soon <span class="n">${counts.due_soon}</span></button>
     <button class="tab-btn${defaultBucket === "due_later" ? " active" : ""}" data-tab-bucket="due_later">Due later <span class="n">${counts.due_later}</span></button>
   </div>
@@ -634,6 +663,7 @@ ${focusBanner}
     <option value="contacted1">Contacted 1 (${counts.contacted1})</option>
     <option value="contacted2">Contacted 2 (${counts.contacted2})</option>
     <option value="contacted3">Contacted 3 (${counts.contacted3})</option>
+    <option value="called">Called (${counts.called})</option>
   </select>
   <div class="filter">
     <div class="search-wrap">
@@ -686,7 +716,7 @@ ${
   // Set when opened from a Client card. Like searching, it spans every bucket
   // -- the point is to see everything tracked for that client, whichever tab
   // each row would normally live in.
-  var focusCompany = ${JSON.stringify(focusActive ? focusCompanyUuid : "")};
+  var focusCompany = ${scriptJson(focusActive ? focusCompanyUuid : "")};
 
   function applyFilters() {
     var serviceValue = filterSelect.value;
@@ -717,7 +747,7 @@ ${
       noun = visibleCount === 1 ? ' customer on the ' : ' customers on the ';
       document.getElementById('sub-count').textContent = visibleCount + noun + activePlanLabel + ' plan' + (serviceValue ? ' \\u2014 ' + serviceValue : '');
     } else {
-      noun = activeBucket.indexOf('contacted') === 0 ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
+      noun = activeBucket === 'call' ? (visibleCount === 1 ? ' customer to call' : ' customers to call') : (activeBucket.indexOf('contacted') === 0 || activeBucket === 'called') ? (visibleCount === 1 ? ' customer already contacted' : ' customers already contacted') : (visibleCount === 1 ? ' customer due for renewal' : ' customers due for renewal');
       document.getElementById('sub-count').textContent = visibleCount + noun + (serviceValue ? ' \\u2014 ' + serviceValue : '');
     }
     if (emptyFiltered) emptyFiltered.style.display = (allRows.length && visibleCount === 0) ? 'block' : 'none';
@@ -778,7 +808,7 @@ ${
   // them", which is the state while a plan view spans every bucket.
   function showBucketUi(bucket) {
     tabBtns.forEach(function (b) { b.classList.toggle('active', b.dataset.tabBucket === bucket); });
-    var isContacted = bucket.indexOf('contacted') === 0;
+    var isContacted = bucket.indexOf('contacted') === 0 || bucket === 'called';
     contactedSelect.value = isContacted ? bucket : '';
     contactedSelect.classList.toggle('active', isContacted);
   }
@@ -903,10 +933,25 @@ ${
         const res = await fetch('/dashboard/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
+          body: JSON.stringify({ token: ${scriptJson(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
         });
         if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
+    });
+  });
+
+  document.querySelectorAll('.called-btn').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      try {
+        const res = await fetch('/dashboard/called', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: btn.dataset.called }),
+        });
+        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
+      } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
     });
   });
 
@@ -918,7 +963,7 @@ ${
         const res = await fetch('/dashboard/dismiss', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: ${JSON.stringify(token)}, dueCustomerId: rowId }),
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: rowId }),
         });
         if (res.ok) {
           var row = document.querySelector('tr[data-row-id="' + rowId + '"]');
@@ -943,6 +988,14 @@ ${
 // naturally next time they're actually due again, rather than being lost.
 export async function dismissDueCustomer(env, tenantId, dueCustomerId) {
   await env.DB.prepare("UPDATE due_customers SET dismissed_at = ? WHERE id = ? AND tenant_id = ?")
+    .bind(Date.now(), dueCustomerId, tenantId)
+    .run();
+}
+
+// Step 4 of the chase: staff phoned the customer after the final reminder.
+// Moves the row from "Call customer" to "Called"; a new service cycle clears it.
+export async function markCustomerCalled(env, tenantId, dueCustomerId) {
+  await env.DB.prepare("UPDATE due_customers SET called_at = ? WHERE id = ? AND tenant_id = ?")
     .bind(Date.now(), dueCustomerId, tenantId)
     .run();
 }
@@ -983,6 +1036,16 @@ export async function approveAndSendDraft(env, tenantId, draftId, editedBody, { 
   // closing off the channel -- while a double-clicked button still can't.
   const reSendable = draft.status === "pending" || draft.status === "failed" || (resend && draft.status === "sent");
   if (!reSendable) return; // already actioned -- idempotent
+
+  // Atomic claim before sending: two tabs (or two staff) clicking Send at the
+  // same moment both passed the status check above and both sent. Only the
+  // request whose UPDATE actually flips the status gets to send.
+  const claim = await env.DB.prepare(
+    `UPDATE reminder_drafts SET status = 'approved_sending' WHERE id = ? AND status = ? AND status IN ('pending', 'failed', 'sent')`
+  )
+    .bind(draftId, draft.status)
+    .run();
+  if (!claim?.meta?.changes) return; // someone else claimed it first
 
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(draft.due_customer_id).first();
   const body = typeof editedBody === "string" && editedBody.trim() ? editedBody : draft.draft_body;
