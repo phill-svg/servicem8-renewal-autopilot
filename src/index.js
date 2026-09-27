@@ -10,7 +10,7 @@ import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE1
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, dedupeRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
-import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer } from "./dashboard.js";
+import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer, markCustomerCalled } from "./dashboard.js";
 
 // ---- install / OAuth2 ------------------------------------------------
 
@@ -534,6 +534,21 @@ async function handleDashboardDismiss(request, env) {
   }
 }
 
+async function handleDashboardCalled(request, env) {
+  const { token, dueCustomerId } = await readJson(request);
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
+  if (!dueCustomerId) return json({ error: "dueCustomerId required" }, { status: 400 });
+
+  try {
+    await markCustomerCalled(env, tenantId, dueCustomerId);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`dashboard mark-called failed for tenant ${tenantId}, due_customer ${dueCustomerId}`, err);
+    return json({ error: "could not mark this customer as called right now" }, { status: 502 });
+  }
+}
+
 // ---- admin routes ----------------------------------------------------------
 // Standing in for the Phase 2 setup wizard, which doesn't exist yet -- these
 // let us configure tracking rules and run the engine manually. Gated by
@@ -851,6 +866,7 @@ export default {
     if (pathname === "/dashboard" && method === "GET") return handleDashboard(request, env);
     if (pathname === "/dashboard/approve" && method === "POST") return handleDashboardApprove(request, env);
     if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
+    if (pathname === "/dashboard/called" && method === "POST") return handleDashboardCalled(request, env);
 
     if (pathname === "/debug/badge-handoff" && method === "GET") return handleDebugBadgeHandoff(request, env);
     if (pathname === "/debug/rekey-addresses" && method === "GET") return handleDebugRekeyAddresses(request, env);

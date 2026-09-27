@@ -1020,7 +1020,7 @@ async function resetReminderSequenceForGroup(env, tenantId, rule, move) {
   await env.DB.prepare("UPDATE reminder_drafts SET status = 'superseded' WHERE due_customer_id = ? AND status = 'pending'")
     .bind(row.id)
     .run();
-  await env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL WHERE id = ?").bind(row.id).run();
+  await env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL WHERE id = ?").bind(row.id).run();
 }
 
 // Runs on the nightly cron immediately before the recompute, so the recompute

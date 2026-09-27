@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS due_customers (
   -- -- no separate "cancelled" state needed.
   reminder_round           INTEGER NOT NULL DEFAULT 1,
   last_reminder_sent_at    INTEGER,
+  -- Step 4 (migration 006): after round 3 is sent the row moves to the
+  -- dashboard's "Call customer" tab; called_at is set by "Mark called".
+  called_at                INTEGER,
   UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);

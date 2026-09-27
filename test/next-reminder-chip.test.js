@@ -32,14 +32,41 @@ test("a trigger date already passed says tonight", async () => {
   assert.ok(isVisible(row, "next-chip"));
 });
 
-test("an exhausted sequence is flagged as having nothing scheduled", async () => {
+test("after the final reminder the customer becomes a call task", async () => {
   const env = makeEnv({
     customers: [contacted({ contact_name_cache: "All Done", reminder_round: 4 })],
     drafts: [sentDraft],
   });
-  const row = rowFor(await renderDashboardHtml(env, "t", "tok"), "All Done");
-  assert.match(row, /nothing further scheduled/);
-  assert.ok(isVisible(row, "next-chip warn"));
+  const html = await renderDashboardHtml(env, "t", "tok");
+  const row = rowFor(html, "All Done");
+  assert.match(row, /data-bucket="call"/);
+  assert.match(row, />Call customer</);
+  assert.ok(isVisible(row, 'class="call-btn"'), "call button must not be hidden inside the composer");
+  assert.ok(isVisible(row, 'data-called="cust1"'), "mark-called button must be visible");
+  assert.match(html, /data-tab-bucket="call">Call customer <span class="n">1</);
+});
+
+test("a call task with no phone says so instead of a dead call button", async () => {
+  const env = makeEnv({
+    customers: [contacted({ contact_name_cache: "No Phone", reminder_round: 4, contact_phone_cache: null })],
+    drafts: [baseDraft({ status: "sent", sent_at: 1786485399259, channel: "email" })],
+  });
+  const row = rowFor(await renderDashboardHtml(env, "t", "tok"), "No Phone");
+  assert.doesNotMatch(row, /class="call-btn"/);
+  assert.match(row, /No phone number to call/);
+});
+
+test("once marked called the row moves to Called and shows when", async () => {
+  const env = makeEnv({
+    customers: [contacted({ contact_name_cache: "Rang Them", reminder_round: 4, called_at: 1786485399259 })],
+    drafts: [sentDraft],
+  });
+  const html = await renderDashboardHtml(env, "t", "tok");
+  const row = rowFor(html, "Rang Them");
+  assert.match(row, /data-bucket="called"/);
+  assert.ok(isVisible(row, "called-chip"));
+  assert.doesNotMatch(row, /data-called=/);
+  assert.match(html, /<option value="called">Called \(1\)</);
 });
 
 test("a customer still awaiting their first send gets no chip", async () => {
