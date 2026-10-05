@@ -10,7 +10,7 @@
 // missing on another). Keying on the street-address line only fixed it.
 
 import { randomId, parseServiceM8Date, isoDate, escapeHtml } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, deleteBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges, createInboxMessage, createStaffNotification } from "./servicem8-api.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobs, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, deleteBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges, createInboxMessage, createStaffNotification } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -239,22 +239,46 @@ async function fetchJobsForRule(env, tenantId, rule, { before } = {}) {
 
 const BACKFILL_CHUNK_DAYS = 180; // ~6 months per chunk, keeps each API call and D1 batch bounded
 
-// The dedupe key that decides which jobs belong to the same customer at the
-// same property. Exported for tests because getting it wrong silently merges
-// two properties into one -- and since 2026-08-12 that mistake is visible in
-// ServiceM8, where the badge hand-off would move a badge across them.
+// The dedupe key that decides which jobs are the same PROPERTY. Exported for
+// tests because getting it wrong silently merges two properties into one --
+// and since 2026-08-12 that mistake is visible in ServiceM8, where the badge
+// hand-off would move a badge across them.
 //
-// The slash is KEPT: stripping it turned "2/9 Hopman Pl" into "29 hopman pl",
-// identical to a real 29 Hopman Pl on the same street. 14% of TCB's tracked
-// addresses are units, so this was one property-manager client away from
-// merging two homes. No such collision existed in the live data when this was
-// fixed, which is why the key migration was a clean rename.
+// Since 2026-10-06 it's the only thing that identifies a property: jobs on
+// different client cards at the same address (e.g. "Elizabeth Zaja" and
+// "Anna Zaja" at 23 Joyner Crescent) are one renewal, not two. So the key
+// has to be canonical across every way the same address gets written --
+// the online booking form wrote "23 Joyner Cr" where the original job said
+// "23 Joyner Crescent", and the two never matched, so Elizabeth stayed
+// "due" after she'd already been serviced.
+//
+//   - newlines/commas become spaces: the suburb + postcode stay in the key.
+//     With matching across client cards, the suburb is what keeps
+//     "1 Smith St, Kambah" apart from "1 Smith St, Flynn".
+//   - street types are expanded (Cr/Cres -> crescent, St -> street, ...).
+//   - state, country and "unit" words are dropped; they vary by who typed it.
+//   - the slash is KEPT: stripping it turned "2/9 Hopman Pl" into
+//     "29 hopman pl", identical to a real 29 Hopman Pl on the same street.
+const STREET_TYPES = {
+  cr: "crescent", cres: "crescent", cresc: "crescent", crs: "crescent",
+  st: "street", rd: "road", ave: "avenue", av: "avenue", pl: "place",
+  ct: "court", crt: "court", dr: "drive", drv: "drive",
+  cct: "circuit", crct: "circuit", cir: "circuit", cl: "close",
+  tce: "terrace", terr: "terrace", pde: "parade", gr: "grove", gve: "grove",
+  ln: "lane", hwy: "highway", blvd: "boulevard", bvd: "boulevard",
+  pkwy: "parkway", sq: "square", wy: "way", esp: "esplanade", gdns: "gardens",
+};
+const DROPPED_WORDS = new Set(["australia", "act", "nsw", "vic", "qld", "sa", "wa", "tas", "nt", "unit", "u", "apt"]);
+
 export function normalizeStreet(addr) {
-  return (addr || "")
-    .split(",")[0]
-    .trim()
+  return String(addr || "")
     .toLowerCase()
-    .replace(/[^a-z0-9 /]/g, "");
+    .replace(/[\n\r,]/g, " ")
+    .replace(/[^a-z0-9 /]/g, "")
+    .split(/\s+/)
+    .filter((w) => w && !DROPPED_WORDS.has(w))
+    .map((w) => STREET_TYPES[w] || w)
+    .join(" ");
 }
 
 function addMonths(date, months) {
@@ -361,22 +385,66 @@ async function getWarrantyCategoryUuids(env, tenantId) {
   }
 }
 
-// Groups raw jobs by (company_uuid, normalized street address), keeps the
-// most-recently-completed job per group, and upserts a candidate row --
-// shared by both the backfill path and the live webhook-triggered path.
+// Brings stored address_keys in line with the current normalizeStreet, so a
+// change to the key (like the 2026-10-06 property-matching fix) heals itself
+// on the next recompute instead of needing a manual migration. Rows that
+// now share a key are the same property: the most recently serviced one is
+// kept and the rest retired. Steady state: one SELECT, no writes.
+async function rekeyRowsForRule(env, tenantId, rule) {
+  const { results: rows } = await env.DB.prepare(
+    "SELECT id, address_key, address_display, last_completed_at FROM due_customers WHERE tenant_id = ? AND category_config_id = ?"
+  )
+    .bind(tenantId, rule.id)
+    .all();
+  const byKey = new Map();
+  for (const r of rows || []) {
+    const key = normalizeStreet(r.address_display) || r.address_key; // blank display: leave the row as it is
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(r);
+  }
+  for (const [key, group] of byKey) {
+    if (group.length === 1 && group[0].address_key === key) continue;
+    const newest = (r) => parseServiceM8Date(r.last_completed_at)?.getTime() ?? 0;
+    const [keeper, ...dupes] = [...group].sort((a, b) => newest(b) - newest(a));
+    // Retire first: the keeper's new key could otherwise clash on UNIQUE.
+    for (const d of dupes) await retireDueCustomer(env, d.id);
+    if (keeper.address_key !== key) {
+      await env.DB.prepare("UPDATE due_customers SET address_key = ? WHERE id = ?").bind(key, keeper.id).run();
+    }
+  }
+}
+
+// Groups raw jobs by PROPERTY (normalized address, across client cards),
+// keeps the most-recently-completed job per property, and upserts a
+// candidate row -- shared by both the backfill path and the live
+// webhook-triggered path.
 async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
   const warrantyCategoryUuids = await getWarrantyCategoryUuids(env, tenantId);
+  await rekeyRowsForRule(env, tenantId, rule);
 
   const groups = new Map();
   for (const job of jobs) {
     if (warrantyCategoryUuids.has(job.category_uuid)) continue; // see getWarrantyCategoryUuids
     const completedAt = parseServiceM8Date(job.completion_date);
-    if (!completedAt || !job.company_uuid) continue;
-    const key = `${job.company_uuid}|${normalizeStreet(job.job_address)}`;
-    const existing = groups.get(key);
+    const addressKey = normalizeStreet(job.job_address);
+    // A blank address would merge every address-less job in the account.
+    if (!completedAt || !job.company_uuid || !addressKey) continue;
+    const existing = groups.get(addressKey);
     if (!existing || completedAt > existing.completedAt) {
-      groups.set(key, { job, completedAt, addressKey: normalizeStreet(job.job_address) });
+      groups.set(addressKey, { job, completedAt, addressKey });
     }
+  }
+  if (!groups.size) return;
+
+  // One read for the whole pass (see listOpenJobs). null = the check failed:
+  // don't suppress anything on it -- worst case a customer who's already
+  // rebooked shows up in the queue once, which a human reviewing it will
+  // notice.
+  let openJobKeys = null;
+  try {
+    openJobKeys = new Set((await listOpenJobs(env, tenantId)).map((oj) => normalizeStreet(oj.job_address)).filter(Boolean));
+  } catch (err) {
+    console.error(`due-engine: open-jobs check failed for tenant ${tenantId}:`, err);
   }
 
   const today = new Date();
@@ -384,15 +452,28 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     const dueDate = addMonths(completedAt, rule.interval_months);
     const bucket = bucketFor(today, dueDate, rule.due_soon_lead_days, rule.overdue_grace_days, rule.overdue_max_days, rule.due_later_lead_days);
 
-    const existing = await env.DB.prepare(
-      `SELECT id, last_completed_at FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ?`
+    // Every row for this property, whichever client card it was created on.
+    const { results: propertyRows } = await env.DB.prepare(
+      `SELECT id, servicem8_company_uuid, last_completed_at FROM due_customers WHERE tenant_id = ? AND address_key = ? AND category_config_id = ?`
     )
-      .bind(tenantId, job.company_uuid, addressKey, rule.id)
-      .first();
-    const existingAt = existing ? parseServiceM8Date(existing.last_completed_at) : null;
-    // Never move a customer BACKWARDS: a backfill chunk only sees older
+      .bind(tenantId, addressKey, rule.id)
+      .all();
+    const rowAt = (r) => parseServiceM8Date(r.last_completed_at);
+    const newestAt = (propertyRows || []).reduce((max, r) => (rowAt(r) && (!max || rowAt(r) > max) ? rowAt(r) : max), null);
+    // Never move a property BACKWARDS: a backfill chunk only sees older
     // history, and its "latest" job must not overwrite a newer service.
-    if (existingAt && completedAt < existingAt) continue;
+    if (newestAt && completedAt < newestAt) continue;
+
+    // One row per property: keep the one on the serviced job's card (else
+    // the most recent), retire any others, and move the keeper onto that
+    // card so contact details come from whoever was actually serviced.
+    const sorted = [...(propertyRows || [])].sort((a, b) => (rowAt(b)?.getTime() ?? 0) - (rowAt(a)?.getTime() ?? 0));
+    const existing = sorted.find((r) => r.servicem8_company_uuid === job.company_uuid) || sorted[0] || null;
+    for (const r of sorted) if (r !== existing) await retireDueCustomer(env, r.id);
+    if (existing && existing.servicem8_company_uuid !== job.company_uuid) {
+      await env.DB.prepare("UPDATE due_customers SET servicem8_company_uuid = ? WHERE id = ?").bind(job.company_uuid, existing.id).run();
+    }
+    const existingAt = existing ? rowAt(existing) : null;
 
     if (!bucket) {
       // No longer actionable -- serviced again (not due for months) or past
@@ -406,23 +487,12 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     // cycle's reminders and call status no longer apply -- start over.
     if (existingAt && completedAt > existingAt) await startNewReminderCycle(env, existing.id);
 
-    let suppressedReason = null;
-    try {
-      // Filter by matching address, not just company -- a client managing
-      // multiple properties (e.g. a property manager) would otherwise have
-      // an open job at ANY of their properties wrongly suppress reminders
-      // for ALL of them. Confirmed live: a client with an open job at
-      // "12/26 Cynthea Teague Crescent" was suppressing a due reminder for
-      // their unrelated "117 Clift Crescent" property.
-      const openJobs = await listOpenJobsForCompany(env, tenantId, job.company_uuid);
-      const openJobsAtThisAddress = (openJobs || []).filter((oj) => normalizeStreet(oj.job_address) === addressKey);
-      if (openJobsAtThisAddress.length > 0) suppressedReason = "open_pipeline_job";
-    } catch (err) {
-      // If the open-jobs check itself fails, don't block the due-candidate
-      // row on it -- worst case a customer who's actually already rebooked
-      // shows up in the queue once, which a human reviewing it will notice.
-      console.error(`due-engine: open-jobs check failed for company ${job.company_uuid}:`, err);
-    }
+    // Matched by property, not company -- a property manager with an open
+    // job at one of their properties mustn't suppress the others (confirmed
+    // live: "12/26 Cynthea Teague Crescent" was suppressing "117 Clift
+    // Crescent"), and an open booking on another client card at the SAME
+    // property must suppress this one.
+    const suppressedReason = openJobKeys && openJobKeys.has(addressKey) ? "open_pipeline_job" : null;
 
     let contact = null;
     try {
@@ -942,7 +1012,7 @@ export async function recomputeAllCategoriesForTenant(env, tenantId) {
 // because deciding is where the risk lives -- a wrong grouping rule here
 // edits real jobs.
 //
-// Each move: { companyUuid, addressKey, addTo: job|null, removeFrom: [job],
+// Each move: { companyUuid (the latest job's card), addressKey, addTo: job|null, removeFrom: [job],
 // dateChanged: bool }. addTo is null when the newest job is already correct
 // and only stale duplicates need clearing.
 export function planBadgeMoves(jobs, badgeUuid, warrantyCategoryUuids = new Set()) {
@@ -950,14 +1020,15 @@ export function planBadgeMoves(jobs, badgeUuid, warrantyCategoryUuids = new Set(
   for (const job of jobs) {
     if (warrantyCategoryUuids.has(job.category_uuid)) continue; // a warranty callback must not push the renewal out
     const addressKey = normalizeStreet(job.job_address);
-    // A blank address would collapse every job at this company into one
-    // group and hand the badge to an unrelated property's job.
+    // A blank address would collapse every address-less job into one group
+    // and hand the badge to an unrelated property's job.
     if (!addressKey || !job.company_uuid) continue;
     const completedAt = parseServiceM8Date(job.completion_date);
     if (!completedAt) continue;
-    const key = `${job.company_uuid}|${addressKey}`;
-    if (!groups.has(key)) groups.set(key, { companyUuid: job.company_uuid, addressKey, entries: [] });
-    groups.get(key).entries.push({ job, completedAt });
+    // By property, across client cards: a later job on another card at the
+    // same address (two people in one household) takes the badge too.
+    if (!groups.has(addressKey)) groups.set(addressKey, { addressKey, entries: [] });
+    groups.get(addressKey).entries.push({ job, completedAt });
   }
 
   const moves = [];
@@ -974,7 +1045,7 @@ export function planBadgeMoves(jobs, badgeUuid, warrantyCategoryUuids = new Set(
     if (latestAlreadyBadged && !stale.length) continue;
 
     moves.push({
-      companyUuid: group.companyUuid,
+      companyUuid: latest.job.company_uuid,
       addressKey: group.addressKey,
       addTo: latestAlreadyBadged ? null : latest.job,
       removeFrom: stale.map((e) => e.job),
@@ -1057,14 +1128,17 @@ async function retireDueCustomer(env, dueCustomerId) {
   ]);
 }
 
+// Every row for the property, on any client card. A row still on an
+// old-format key is missed here, but the recompute that follows rekeys it and
+// sees the newer job, which resets or retires it all the same.
 async function resetReminderSequenceForGroup(env, tenantId, rule, move) {
-  const row = await env.DB.prepare(
-    `SELECT id FROM due_customers WHERE tenant_id = ? AND servicem8_company_uuid = ? AND address_key = ? AND category_config_id = ?`
+  const { results: rows } = await env.DB.prepare(
+    `SELECT id FROM due_customers WHERE tenant_id = ? AND address_key = ? AND category_config_id = ?`
   )
-    .bind(tenantId, move.companyUuid, move.addressKey, rule.id)
-    .first();
-  if (!row) return; // not tracked yet -- the recompute that follows will create it against the new date
-  await startNewReminderCycle(env, row.id);
+    .bind(tenantId, move.addressKey, rule.id)
+    .all();
+  // none = not tracked yet -- the recompute that follows will create it against the new date
+  for (const row of rows || []) await startNewReminderCycle(env, row.id);
 }
 
 // Runs on the nightly cron immediately before the recompute, so the recompute
