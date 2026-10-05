@@ -9,8 +9,8 @@
 // differently across job records (suburb/state/postcode present on one job,
 // missing on another). Keying on the street-address line only fixed it.
 
-import { randomId, parseServiceM8Date, isoDate } from "./util.js";
-import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, deleteBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges } from "./servicem8-api.js";
+import { randomId, parseServiceM8Date, isoDate, escapeHtml } from "./util.js";
+import { listCompletedJobsForCategory, listCompletedJobsForBadge, listOpenJobsForCompany, getPrimaryContact, listCategories, listNotesForJob, listBadges, createBadge, updateBadge, deleteBadge, listJobSmsRecords, listJobEmailRecords, listAllCompletedJobs, listAllJobsAnyStatus, parseBadges, updateJobBadges, createInboxMessage, createStaffNotification } from "./servicem8-api.js";
 
 // Renewal Autopilot's own badges, auto-created in every installing tenant's
 // ServiceM8 account so a new business doesn't have to hand-make one before
@@ -1045,7 +1045,7 @@ function archiveDraftsStatements(env, dueCustomerId) {
 async function startNewReminderCycle(env, dueCustomerId) {
   await env.DB.batch([
     ...archiveDraftsStatements(env, dueCustomerId),
-    env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL, dismissed_at = NULL WHERE id = ?").bind(dueCustomerId),
+    env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL, dismissed_at = NULL, due_notified_at = NULL WHERE id = ?").bind(dueCustomerId),
   ]);
 }
 
@@ -1292,6 +1292,161 @@ export async function verifyDeliveries(env) {
       await verifyEmailDeliveriesForTenant(env, tenantId);
     } catch (err) {
       console.error(`email delivery verification failed for tenant ${tenantId}`, err);
+    }
+  }
+}
+
+// ---- daily due digest -----------------------------------------------------
+//
+// Staff asked to be told when customers become due the way ServiceM8's own
+// Reminders add-on does it: an Inbox item plus a push/bell notification, not
+// a task on the job. Once each morning (8am Sydney -- the nightly cron runs
+// at 2-3am Canberra, too early for a push) every customer that has newly
+// landed in Due now / Overdue and hasn't been chased yet goes into ONE Inbox
+// summary, and each staff member who uses the add-on gets a notification
+// that opens it. due_notified_at stops a customer being announced twice in
+// the same cycle; startNewReminderCycle clears it for the next one.
+
+const DIGEST_HOUR_SYDNEY = 8;
+const DIGEST_NOTIFICATION_NAMES = 5; // names listed in the push before "and N more"
+
+const SYDNEY_PARTS_FMT = new Intl.DateTimeFormat("en-AU", {
+  timeZone: "Australia/Sydney",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+const SYDNEY_LABEL_FMT = new Intl.DateTimeFormat("en-AU", { timeZone: "Australia/Sydney", weekday: "short", day: "numeric", month: "short" });
+
+// Sydney-local calendar date (YYYY-MM-DD) and hour for `now`.
+export function sydneyNow(now = new Date()) {
+  const p = Object.fromEntries(SYDNEY_PARTS_FMT.formatToParts(now).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour), label: SYDNEY_LABEL_FMT.format(now) };
+}
+
+function sm8DateToAu(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || "");
+  return m && m[1] !== "0000" ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+
+// Pure: rows (due_customers + plan_name) -> the Inbox subject/body and the
+// notification title/message. Overdue first, then oldest service first.
+export function buildDueDigest(rows, todayLabel) {
+  const sorted = [...rows].sort(
+    (a, b) => (a.bucket === "overdue" ? 0 : 1) - (b.bucket === "overdue" ? 0 : 1) || String(a.last_completed_at).localeCompare(String(b.last_completed_at))
+  );
+  const n = sorted.length;
+  const noun = n === 1 ? "customer" : "customers";
+  const nameOf = (r) => r.contact_name_cache || r.address_display || "Unknown customer";
+
+  const lines = sorted.map((r) => {
+    const head = [nameOf(r), r.address_display, r.contact_phone_cache].filter(Boolean).join(" - ");
+    const detail = [
+      r.plan_name,
+      r.bucket === "overdue" ? "Overdue" : "Due now",
+      sm8DateToAu(r.last_completed_at) && `last service ${sm8DateToAu(r.last_completed_at)}`,
+      r.last_job_number && `Job #${r.last_job_number}`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    return `* ${head}\n  ${detail}`;
+  });
+
+  const shown = sorted.slice(0, DIGEST_NOTIFICATION_NAMES).map((r) => escapeHtml(nameOf(r)));
+  const more = n - shown.length;
+  return {
+    subject: `${n} ${noun} due for renewal - ${todayLabel}`,
+    messageText:
+      `${n} ${noun} ${n === 1 ? "is" : "are"} now due for their next service:\n\n` +
+      lines.join("\n\n") +
+      `\n\nOpen Job Reminders from the Add-ons menu to review and send their reminders.`,
+    notifTitle: "Job Reminders",
+    notifMessage: `<b>${n} ${noun}</b> ${n === 1 ? "is" : "are"} now due for renewal<br>${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`,
+  };
+}
+
+// force: skip the 8am gate and the once-a-day claim (debug route only).
+export async function sendDueDigestForTenant(env, tenantId, { force = false, now = new Date() } = {}) {
+  const local = sydneyNow(now);
+  if (!force && local.hour < DIGEST_HOUR_SYDNEY) return { skipped: "before-digest-hour" };
+
+  await env.DB.prepare("INSERT OR IGNORE INTO tenant_settings (tenant_id) VALUES (?)").bind(tenantId).run();
+  // Atomic once-per-day claim: the 2-minute sweep calls this ~480 times a
+  // day after 8am, and only the call that flips the date gets to send.
+  const claim = await env.DB.prepare(
+    `UPDATE tenant_settings SET last_due_digest_date = ? WHERE tenant_id = ? AND (? OR last_due_digest_date IS NULL OR last_due_digest_date != ?)`
+  )
+    .bind(local.date, tenantId, force ? 1 : 0, local.date)
+    .run();
+  if (!claim?.meta?.changes) return { skipped: "already-sent-today" };
+
+  // reminder_round = 1: not yet contacted -- exactly what the dashboard shows
+  // under Due now / Overdue (contacted rows move to the Contacted tabs).
+  const { results: rows } = await env.DB.prepare(
+    `SELECT dc.*, cc.category_name_cache AS plan_name FROM due_customers dc
+     LEFT JOIN category_config cc ON cc.id = dc.category_config_id
+     WHERE dc.tenant_id = ? AND dc.bucket IN ('due', 'overdue') AND dc.reminder_round = 1
+       AND dc.suppressed_reason IS NULL AND dc.dismissed_at IS NULL AND dc.due_notified_at IS NULL`
+  )
+    .bind(tenantId)
+    .all();
+  if (!rows || !rows.length) return { sent: 0 };
+
+  const { results: recipients } = await env.DB.prepare("SELECT staff_uuid FROM notify_recipients WHERE tenant_id = ?").bind(tenantId).all();
+  if (!recipients || !recipients.length) {
+    // Nobody has opened the add-on yet, so there's no one to tell. Release
+    // the claim: the first sweep after someone opens it sends today's digest.
+    await env.DB.prepare("UPDATE tenant_settings SET last_due_digest_date = NULL WHERE tenant_id = ?").bind(tenantId).run();
+    return { skipped: "no-recipients", pending: rows.length };
+  }
+
+  const digest = buildDueDigest(rows, local.label);
+  let inboxUuid;
+  try {
+    inboxUuid = await createInboxMessage(env, tenantId, { subject: digest.subject, messageText: digest.messageText, fromName: "Job Reminders" });
+  } catch (err) {
+    // Customers stay un-notified and roll into tomorrow's digest. A tenant
+    // authorized before publish_inbox existed lands here until they reinstall.
+    const why = isMissingScopeError(err, "publish_inbox") ? " (missing publish_inbox scope -- reinstall the add-on)" : "";
+    console.error(`due digest: inbox message failed for tenant ${tenantId}${why}`, err);
+    return { error: String(err && err.message) };
+  }
+
+  const notifiedAt = Date.now();
+  await env.DB.batch(rows.map((r) => env.DB.prepare("UPDATE due_customers SET due_notified_at = ? WHERE id = ?").bind(notifiedAt, r.id)));
+
+  // One request per recipient: a single ex-staff uuid would otherwise make
+  // ServiceM8 reject the notification for everyone. Never retried -- a
+  // retried success duplicates the push.
+  let notified = 0;
+  for (const { staff_uuid } of recipients) {
+    try {
+      await createStaffNotification(env, tenantId, {
+        staffUuids: [staff_uuid],
+        title: digest.notifTitle,
+        message: digest.notifMessage,
+        destinationUrl: `servicem8://inbox/${inboxUuid}`,
+      });
+      notified++;
+    } catch (err) {
+      console.error(`due digest: notification to staff ${staff_uuid} failed for tenant ${tenantId}`, err);
+    }
+  }
+  return { sent: rows.length, inboxUuid, notified, recipients: recipients.length };
+}
+
+// Called from the 2-minute sweep (src/index.js). Before 8am Sydney this
+// returns without touching D1; after, it's one claim UPDATE per tenant.
+export async function sendDueDigests(env, { now = new Date() } = {}) {
+  if (sydneyNow(now).hour < DIGEST_HOUR_SYDNEY) return;
+  const { results: tenants } = await env.DB.prepare("SELECT servicem8_account_uuid FROM tenants WHERE status = 'active'").all();
+  for (const tenant of tenants || []) {
+    try {
+      await sendDueDigestForTenant(env, tenant.servicem8_account_uuid, { now });
+    } catch (err) {
+      console.error(`due digest failed for tenant ${tenant.servicem8_account_uuid}`, err);
     }
   }
 }

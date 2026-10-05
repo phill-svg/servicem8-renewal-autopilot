@@ -8,7 +8,7 @@ import { randomId, json, escapeHtml, readJson } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens, getValidAccessToken } from "./servicem8-oauth.js";
 import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE164Au, isSendableMobile, listAllCompletedJobs, listBadges, updateBadge, parseBadges } from "./servicem8-api.js";
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
-import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, dedupeRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES } from "./due-engine.js";
+import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, dedupeRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES, sendDueDigests, sendDueDigestForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
 import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer, markCustomerCalled } from "./dashboard.js";
 
@@ -318,6 +318,11 @@ async function runBackfillAndRefreshSweep(env) {
   // send response alone doesn't prove that (see verifyDeliveries). Cheap in
   // steady state: two D1 queries per tenant unless unverified sends exist.
   await verifyDeliveries(env);
+
+  // The once-a-morning "customers now due" Inbox item + notification. Rides
+  // this sweep rather than the nightly cron so it lands at 8am Sydney local
+  // time (DST-proof) instead of 2-3am -- see sendDueDigestForTenant.
+  await sendDueDigests(env);
 }
 
 // ---- ServiceM8 Add-on: job-card button -> standalone dashboard -----------
@@ -468,6 +473,9 @@ async function handleAddonQueue(request, env) {
   const tenant = await resolveTenantFromAccountUuid(env, accountUuid);
   if (!tenant) return addonResponse(addonErrorHtml("Could not identify your account. Please reinstall the add-on."));
 
+  // Whoever opens Job Reminders gets the daily due digest notification.
+  await recordNotifyRecipient(env, tenant.servicem8_account_uuid, payload?.auth?.staffUUID);
+
   const origin = new URL(request.url).origin;
   const token = await createDashboardToken(env.SERVICEM8_APP_SECRET, tenant.servicem8_account_uuid);
   // Client-card button (manifest action entity "company"): open the queue
@@ -481,6 +489,22 @@ async function handleAddonQueue(request, env) {
   const dashboardUrl =
     `${origin}/dashboard?token=${encodeURIComponent(token)}` + (companyUuid ? `&company=${encodeURIComponent(companyUuid)}` : "");
   return addonResponse(dashboardRedirectHtml(dashboardUrl));
+}
+
+// Best-effort: a failure here must never stop the dashboard opening.
+async function recordNotifyRecipient(env, tenantId, staffUuid) {
+  if (!staffUuid) return;
+  try {
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO notify_recipients (tenant_id, staff_uuid, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(tenant_id, staff_uuid) DO UPDATE SET last_seen_at = excluded.last_seen_at`
+    )
+      .bind(tenantId, staffUuid, now, now)
+      .run();
+  } catch (err) {
+    console.error(`addon: failed to record notify recipient for tenant ${tenantId}`, err);
+  }
 }
 
 function handleAddonPreflight() {
@@ -762,6 +786,19 @@ async function handleDebugRecompute(request, env) {
   }
 }
 
+// Sends the daily due digest now (skips the 8am gate and once-a-day claim)
+// -- for checking the Inbox item + push arrive after a reinstall.
+async function handleDebugDueDigest(request, env) {
+  if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
+  const tenantId = new URL(request.url).searchParams.get("tenant");
+  if (!tenantId) return json({ error: "?tenant= required" }, { status: 400 });
+  try {
+    return json(await sendDueDigestForTenant(env, tenantId, { force: true }));
+  } catch (err) {
+    return json({ error: String(err && err.message) }, { status: 502 });
+  }
+}
+
 async function handleDebugDueCustomers(request, env) {
   if (!requireAdminAuth(request, env)) return json({ error: "unauthorized" }, { status: 401 });
   const tenantId = new URL(request.url).searchParams.get("tenant");
@@ -876,6 +913,7 @@ export default {
     if (pathname === "/debug/configure-category" && method === "POST") return handleDebugConfigureCategory(request, env);
     if (pathname === "/debug/recompute" && method === "POST") return handleDebugRecompute(request, env);
     if (pathname === "/debug/due-customers" && method === "GET") return handleDebugDueCustomers(request, env);
+    if (pathname === "/debug/due-digest" && method === "POST") return handleDebugDueDigest(request, env);
     if (pathname === "/debug/raw" && method === "GET") return handleDebugRaw(request, env);
     if (pathname === "/debug/check-phone" && method === "GET") return handleDebugCheckPhone(request, env);
     if (pathname === "/debug/sms-probe" && method === "POST") return handleDebugSmsProbe(request, env);

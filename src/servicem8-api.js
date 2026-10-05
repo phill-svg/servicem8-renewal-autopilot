@@ -473,3 +473,47 @@ export async function sendPlatformEmail(env, tenantId, { to, subject, htmlBody, 
   }
   return result;
 }
+
+// ---- Inbox + staff notifications (daily due digest) ----------------------
+//
+// The same two surfaces ServiceM8's own Reminders add-on uses: an Inbox item
+// staff can snooze/archive/convert, and a push + bell notification that opens
+// it. Nothing is written to any job. See sendDueDigestForTenant in
+// src/due-engine.js.
+
+// POST /inboxmessage.json, needs publish_inbox. Docs: 201 with the new
+// InboxMessageDetail (uuid in the body); x-record-uuid is the fallback every
+// other ServiceM8 create endpoint uses (see createBadge).
+export async function createInboxMessage(env, tenantId, { subject, messageText, fromName }) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${API_BASE}/inboxmessage.json`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ subject, message_text: messageText, ...(fromName ? { from_name: fromName } : {}) }),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API POST /inboxmessage.json failed for tenant ${tenantId}: ${res.status} ${text}`);
+  }
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {}
+  const uuid = (body && body.uuid) || res.headers.get("x-record-uuid");
+  if (!uuid) throw new Error(`ServiceM8 POST /inboxmessage.json returned no record UUID: ${text.slice(0, 300)}`);
+  return uuid;
+}
+
+// POST /notification.json, needs create_notifications. Sends an in-app AND
+// push notification to each recipient. If ANY recipient isn't an active
+// staff member the whole request is rejected, and a retried success creates
+// duplicates -- callers send one recipient per request and never retry.
+// message allows only <b>, <i>, <br>.
+export async function createStaffNotification(env, tenantId, { staffUuids, title, message, destinationUrl }) {
+  return sm8PostJson(env, tenantId, `/notification.json`, {
+    recipient_staff_uuids: staffUuids,
+    message,
+    ...(title ? { title } : {}),
+    ...(destinationUrl ? { destination_url: destinationUrl } : {}),
+  });
+}

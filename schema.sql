@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS due_customers (
   -- Step 4 (migration 006): after round 3 is sent the row moves to the
   -- dashboard's "Call customer" tab; called_at is set by "Mark called".
   called_at                INTEGER,
+  -- Daily due digest (migration 007): when this customer was announced in
+  -- the morning Inbox + notification. NULL = not yet this cycle.
+  due_notified_at          INTEGER,
   UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);
@@ -161,7 +164,18 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   sms_template           TEXT,
   email_subject_template TEXT,
   email_body_template    TEXT,
-  business_name          TEXT   -- the installing account's own business name (from /vendor.json), appended as a sign-off to reminder messages
+  business_name          TEXT,  -- the installing account's own business name (from /vendor.json), appended as a sign-off to reminder messages
+  last_due_digest_date   TEXT   -- Sydney-local YYYY-MM-DD of the last due digest (migration 007) -- once-per-day claim
+);
+
+-- Staff who receive the daily due digest notification (migration 007): every
+-- staff member who has opened the Job Reminders add-on.
+CREATE TABLE IF NOT EXISTS notify_recipients (
+  tenant_id     TEXT NOT NULL,
+  staff_uuid    TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, staff_uuid)
 );
 
 -- Our own registry of what webhook subscriptions we believe are active per
