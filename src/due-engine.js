@@ -821,47 +821,154 @@ const FOLLOWUP_TEMPLATES = {
   },
 };
 
+// The same follow-ups for a customer already PAST their due date. The
+// templates above say "coming up due" / "due very soon", which is wrong once
+// the date has gone -- and common, because a round's trigger date (due date
+// minus FOLLOWUP_LEAD_DAYS) has long passed for anyone who was sent round 1
+// late or surfaced already overdue, so the draft appears straight away.
+// Built from one helper per service so the variants can't drift apart.
+function overdueFollowUps(service, { home = "home", extra = "" } = {}) {
+  const tail = extra ? ` ${extra}` : "";
+  return {
+    2: {
+      sms: `Hi {{name}}, just a friendly follow-up -- your ${service} is now overdue. Reply here or give us a call to book a time!`,
+      emailSubject: `Following up -- your ${service} is overdue`,
+      email: `Hi {{name}},\n\nJust following up -- your ${service} is now overdue and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.`,
+    },
+    3: {
+      sms: `Hi {{name}}, final reminder -- your ${service} is overdue. Reply here or call us to book in and keep your ${home} protected!`,
+      emailSubject: `Final reminder -- your ${service} is overdue`,
+      email: `Hi {{name}},\n\nThis is a final reminder that your ${service} is overdue.${tail}\n\nReply to this email or give us a call to book in and keep your ${home} protected.`,
+    },
+  };
+}
+function overdueAltFollowUps(service, { home = "home" } = {}) {
+  return {
+    2: {
+      sms: `Hi {{name}}, your ${service} is now overdue -- get in touch to lock in a time!`,
+      emailSubject: `Your ${service} is overdue`,
+      email: `Hi {{name}},\n\nYour ${service} is now overdue. Get in touch or give us a call to arrange a time that works for you.`,
+    },
+    3: {
+      sms: `Hi {{name}}, final reminder -- your ${service} is overdue. Get in touch to book in and keep your ${home} protected!`,
+      emailSubject: `Final reminder -- your ${service} is overdue`,
+      email: `Hi {{name}},\n\nThis is a final reminder that your ${service} is overdue. Get in touch or give us a call to book in and keep your ${home} protected.`,
+    },
+  };
+}
+const OVERDUE_BY_KEY = {
+  default: overdueFollowUps("pest treatment"),
+  [CATEGORY_UUID.generalPest]: overdueFollowUps("general pest treatment"),
+  [CATEGORY_UUID.rodent]: overdueFollowUps("rodent treatment check-up", { home: "property" }),
+  [CATEGORY_UUID.termiteStations]: overdueFollowUps("termite bait station check", {
+    extra: "Keeping this up to date is essential to keep your termite protection active.",
+  }),
+  [CATEGORY_UUID.termiteInspection]: overdueFollowUps("termite inspection", {
+    extra: "Regular inspections are the best way to catch termite activity early, before it causes damage.",
+  }),
+  generalPestAlt: overdueAltFollowUps("general pest treatment"),
+  rodentAlt: overdueAltFollowUps("rodent treatment check-up", { home: "property" }),
+};
+const FOLLOWUP_OVERDUE_TEMPLATES = {
+  2: Object.fromEntries(Object.entries(OVERDUE_BY_KEY).map(([k, v]) => [k, v[2]])),
+  3: Object.fromEntries(Object.entries(OVERDUE_BY_KEY).map(([k, v]) => [k, v[3]])),
+};
+
+// Past the due date (last service + the plan's interval) -- the same due date
+// nextFollowUpDraftDate counts back from.
+export function isPastDue(dueCustomer, intervalMonths, now = new Date()) {
+  const completedAt = parseServiceM8Date(dueCustomer.last_completed_at);
+  if (!completedAt || !intervalMonths) return false;
+  return now >= addMonths(completedAt, intervalMonths);
+}
+
+// Every piece of text for one follow-up round, in the wording that fits
+// whether the customer is past due. One builder for creating drafts and for
+// refreshing ones already queued, so the two can never disagree.
+export function buildFollowUpTexts(dueCustomer, round, settings, pastDue) {
+  const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
+  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
+  const set = (pastDue ? FOLLOWUP_OVERDUE_TEMPLATES : FOLLOWUP_TEMPLATES)[round];
+  const tmpl = templateForCategory(set, effectiveCategory);
+  const altTmpl = secondaryTemplateFor(set, effectiveCategory);
+  const fill = (text) => signOff(text.replace("{{name}}", firstName), settings);
+  return {
+    sms: fill(tmpl.sms),
+    smsAlt: altTmpl ? fill(altTmpl.sms) : null,
+    emailSubject: tmpl.emailSubject,
+    email: fill(tmpl.email),
+    emailAltSubject: altTmpl?.emailSubject || null,
+    emailAlt: altTmpl ? fill(altTmpl.email) : null,
+  };
+}
+
 async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMonths) {
   const round = dueCustomer.reminder_round;
   const triggerFrom = nextFollowUpDraftDate(dueCustomer, intervalMonths);
   if (!triggerFrom) return; // round 1 (sent by hand) or round 4+ (sequence exhausted)
   if (new Date() < triggerFrom) return; // not time yet for this round
 
-  const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
-  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
-  const tmpl = templateForCategory(FOLLOWUP_TEMPLATES[round], effectiveCategory);
-  const altTmpl = secondaryTemplateFor(FOLLOWUP_TEMPLATES[round], effectiveCategory);
   const settings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
+  const t = buildFollowUpTexts(dueCustomer, round, settings, isPastDue(dueCustomer, intervalMonths));
 
   if (dueCustomer.contact_phone_cache) {
-    const altBody = altTmpl ? signOff(altTmpl.sms.replace("{{name}}", firstName), settings) : null;
-    await insertDraftIfMissing(
-      env,
-      tenantId,
-      dueCustomer.id,
-      "sms",
-      round,
-      null,
-      signOff(tmpl.sms.replace("{{name}}", firstName), settings),
-      null,
-      altBody
-    );
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "sms", round, null, t.sms, null, t.smsAlt);
   }
   if (dueCustomer.contact_email_cache) {
-    const altSubject = altTmpl?.emailSubject || null;
-    const altBody = altTmpl ? signOff(altTmpl.email.replace("{{name}}", firstName), settings) : null;
-    await insertDraftIfMissing(
-      env,
-      tenantId,
-      dueCustomer.id,
-      "email",
-      round,
-      tmpl.emailSubject,
-      signOff(tmpl.email.replace("{{name}}", firstName), settings),
-      altSubject,
-      altBody
-    );
+    await insertDraftIfMissing(env, tenantId, dueCustomer.id, "email", round, t.emailSubject, t.email, t.emailAltSubject, t.emailAlt);
   }
+}
+
+// A round-2/3 draft queued while the due date was still ahead keeps its "due
+// soon" text after the date passes. Rewrites such pending drafts to the
+// overdue wording -- but only when the stored text is exactly what we
+// generated, so nothing anyone else wrote is ever overwritten. (Staff edits
+// only reach the row when the draft is sent, so a pending row's text is
+// normally ours anyway.) Run nightly and on every dashboard load, so the
+// queue reads right the moment a customer passes their due date.
+export async function refreshOverdueFollowUpDrafts(env, tenantId, now = new Date()) {
+  const { results: drafts } = await env.DB.prepare(
+    `SELECT rd.id, rd.channel, rd.round, rd.draft_subject, rd.draft_body, rd.alt_draft_subject, rd.alt_draft_body,
+            dc.contact_name_cache, dc.servicem8_category_uuid, dc.last_job_description_cache, dc.last_completed_at, cc.interval_months
+     FROM reminder_drafts rd
+     JOIN due_customers dc ON dc.id = rd.due_customer_id
+     JOIN category_config cc ON cc.id = dc.category_config_id
+     WHERE rd.tenant_id = ? AND rd.status = 'pending' AND rd.round IN (2, 3)`
+  )
+    .bind(tenantId)
+    .all();
+  if (!drafts || !drafts.length) return 0;
+
+  const settings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
+  let refreshed = 0;
+  for (const d of drafts) {
+    if (!isPastDue(d, d.interval_months, now)) continue;
+    const before = buildFollowUpTexts(d, d.round, settings, false);
+    const after = buildFollowUpTexts(d, d.round, settings, true);
+    const stored =
+      d.channel === "sms"
+        ? [d.draft_body, d.alt_draft_body]
+        : [d.draft_subject, d.draft_body, d.alt_draft_subject, d.alt_draft_body];
+    const ours =
+      d.channel === "sms"
+        ? [before.sms, before.smsAlt]
+        : [before.emailSubject, before.email, before.emailAltSubject, before.emailAlt];
+    if (stored.some((v, i) => (v ?? null) !== (ours[i] ?? null))) continue; // not our "due soon" text -- leave it
+
+    if (d.channel === "sms") {
+      await env.DB.prepare("UPDATE reminder_drafts SET draft_body = ?, alt_draft_body = ? WHERE id = ? AND status = 'pending'")
+        .bind(after.sms, after.smsAlt, d.id)
+        .run();
+    } else {
+      await env.DB.prepare(
+        "UPDATE reminder_drafts SET draft_subject = ?, draft_body = ?, alt_draft_subject = ?, alt_draft_body = ? WHERE id = ? AND status = 'pending'"
+      )
+        .bind(after.emailSubject, after.email, after.emailAltSubject, after.emailAlt, d.id)
+        .run();
+    }
+    refreshed++;
+  }
+  return refreshed;
 }
 
 // Called from the nightly cron alongside recomputeAllCategoriesForTenant.
@@ -871,6 +978,7 @@ async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMont
 // for a customer who's since become suppressed (rebooked) or been dismissed,
 // since both are filtered out of the WHERE clause below.
 export async function generateFollowUpDraftsForTenant(env, tenantId) {
+  await refreshOverdueFollowUpDrafts(env, tenantId);
   const { results: candidates } = await env.DB.prepare(
     `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL AND reminder_round IN (2, 3)`
   )

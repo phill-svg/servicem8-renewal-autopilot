@@ -41,6 +41,14 @@ a job. Design:
 - Force one now: `POST /debug/due-digest?tenant=<id>` (admin key).
 - Code: `sendDueDigestForTenant` / `buildDueDigest` in `src/due-engine.js`; migration 007.
 
+## Reminder wording (changed 2026-10-06)
+- Follow-up rounds 2/3 have two wordings: "coming up due / due very soon" before the due date, and
+  "overdue" once past it (`isPastDue`, `FOLLOWUP_OVERDUE_TEMPLATES`, `buildFollowUpTexts`). Phill's call:
+  plain "overdue", not softer "now due". Round 1 has no "soon" and is unchanged.
+- `refreshOverdueFollowUpDrafts` rewrites queued pending drafts to the overdue wording (nightly + every
+  dashboard load), but only when the stored text exactly equals what we generated. Staff edits only reach
+  the DB at send time, so pending text is ours.
+
 ## ServiceM8 API facts worth remembering
 - API docs index: https://developer.servicem8.com/llms.txt (reference pages are `<name>.md`).
 - Messaging API (SMS/email) lives at the API root, not under `/api_1.0`.
