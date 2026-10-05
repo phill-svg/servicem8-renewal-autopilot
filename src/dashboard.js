@@ -4,8 +4,8 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
-import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts } from "./due-engine.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile } from "./servicem8-api.js";
+import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet } from "./due-engine.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -180,6 +180,20 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   )
     .bind(tenantId)
     .all();
+
+  // Rows for the focused client card. A property is one row across client
+  // cards (see normalizeStreet), so a household's row can sit on the other
+  // person's card -- when nothing matches by card, match the card's own
+  // address instead, so the button never comes up empty for them.
+  const focusIds = new Set();
+  if (focusCompanyUuid) {
+    for (const r of dueCustomers || []) if (r.servicem8_company_uuid === focusCompanyUuid) focusIds.add(r.id);
+    if (!focusIds.size) {
+      const company = await getCompany(env, tenantId, focusCompanyUuid);
+      const key = normalizeStreet(company?.address || company?.address_street);
+      if (key) for (const r of dueCustomers || []) if (r.address_key === key) focusIds.add(r.id);
+    }
+  }
 
   // Service name shown per row is the *actual job's* real category (e.g.
   // "Premium Pest Treatment"), not the tracking rule's own label -- a
@@ -405,7 +419,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const statusLabel = needsCall ? (r.called_at ? "Called" : STYLE.call.label) : alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
-      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-plan="${escapeHtml(r.plan_months ? String(r.plan_months) : "")}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}" style="--accent:${s.accent};--rowbg:${s.bg};">
+      const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-plan="${escapeHtml(r.plan_months ? String(r.plan_months) : "")}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}"${focusIds.has(r.id) ? ' data-focus="1"' : ""} style="--accent:${s.accent};--rowbg:${s.bg};">
         <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
           <div class="cust-name">${escapeHtml(r.contact_name_cache || "Unknown")}</div>
@@ -455,7 +469,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   // Focus state for a queue opened from a Client card. A client with no
   // tracked renewals still gets a banner (saying so) rather than a silently
   // full list, so the button never looks like it did nothing.
-  const focusRows = focusCompanyUuid ? (dueCustomers || []).filter((r) => r.servicem8_company_uuid === focusCompanyUuid) : [];
+  const focusRows = (dueCustomers || []).filter((r) => focusIds.has(r.id));
   const focusActive = !!focusCompanyUuid && focusRows.length > 0;
   const focusName = focusRows.length ? focusRows[0].contact_name_cache || "this client" : "";
   const focusBanner = !focusCompanyUuid
@@ -736,7 +750,7 @@ ${
       var serviceMatch = !serviceValue || row.dataset.service === serviceValue;
       var planMatch = !activePlan || row.dataset.plan === activePlan;
       var searchMatch = !q || (row.dataset.name || '').indexOf(q) !== -1;
-      var companyMatch = !focusCompany || row.dataset.company === focusCompany;
+      var companyMatch = !focusCompany || row.dataset.focus === '1';
       var match = bucketMatch && serviceMatch && planMatch && searchMatch && companyMatch;
       row.style.display = match ? '' : 'none';
       if (match) visibleCount++;

@@ -41,6 +41,18 @@ a job. Design:
 - Force one now: `POST /debug/due-digest?tenant=<id>` (admin key).
 - Code: `sendDueDigestForTenant` / `buildDueDigest` in `src/due-engine.js`; migration 007.
 
+## Property matching (changed 2026-10-06)
+- A renewal is **one per property**, not per client card: `normalizeStreet` (src/due-engine.js) is the
+  property key, and the engine, badge hand-off and open-booking suppression all group by it alone.
+  Phill's call: any completed non-warranty job at the address (any card, any job type) resets it.
+- The key is canonical: street types expanded (Cr/Cres -> crescent, St -> street, Pl -> place...),
+  state/country/"unit" dropped, suburb + postcode KEPT (stops "1 Smith St" in two suburbs merging),
+  unit slash kept ("2/9" != "29"). Why: online bookings write "23 Joyner Cr" vs "23 Joyner Crescent",
+  so Elizabeth Zaja stayed "due" after being serviced.
+- Changing `normalizeStreet` is safe: `rekeyRowsForRule` re-keys stored rows on the next recompute and
+  merges rows that now collide (keeps the most recent). No manual migration needed.
+- Live preview before rollout: 9 properties merged, all genuine duplicates.
+
 ## Reminder wording (changed 2026-10-06)
 - Follow-up rounds 2/3 have two wordings: "coming up due / due very soon" before the due date, and
   "overdue" once past it (`isPastDue`, `FOLLOWUP_OVERDUE_TEMPLATES`, `buildFollowUpTexts`). Phill's call:
