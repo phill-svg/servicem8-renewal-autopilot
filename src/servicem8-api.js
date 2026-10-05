@@ -268,19 +268,22 @@ export async function listCompletedJobsForBadge(env, tenantId, badgeUuid, { befo
   return (jobs || []).filter((j) => parseBadges(j.badges).includes(badgeUuid));
 }
 
-// Open (in-pipeline) jobs for a company -- used by the due-engine's
-// already-rebooked exclusion, mirrors findOpenQuoteJob in
-// tcbpestcontriol/src/servicem8.js generalized to also catch Work Order.
+// Every open (Quote / Work Order) job in the account -- the due-engine's
+// already-rebooked exclusion. Fetched once per recompute and matched to
+// properties by address, so an open booking on ANY client card at a property
+// suppresses its reminder (one bulk read, not one per customer).
 //
 // Confirmed live (2026-08-03): ServiceM8's `ne` filter operator doesn't
 // actually exclude anything -- `status ne 'Completed'` still returned
 // Completed jobs, which made every customer look "already rebooked" and
-// suppressed the entire due queue. Fetch by company_uuid only and filter
-// status client-side instead of trusting `ne`.
-const CLOSED_STATUSES = new Set(["Completed", "Unsuccessful"]);
-export async function listOpenJobsForCompany(env, tenantId, companyUuid) {
-  const jobs = await sm8Fetch(env, tenantId, `/job.json?${odataFilter(`company_uuid eq '${companyUuid}'`)}`);
-  return (jobs || []).filter((j) => !CLOSED_STATUSES.has(j.status));
+// suppressed the entire due queue. So: two `eq` reads, never `ne`. Deleted
+// jobs (active 0) are dropped -- a deleted booking hasn't rebooked anyone.
+export async function listOpenJobs(env, tenantId) {
+  const [quotes, workOrders] = await Promise.all([
+    sm8Fetch(env, tenantId, `/job.json?${odataFilter("status eq 'Quote'")}`),
+    sm8Fetch(env, tenantId, `/job.json?${odataFilter("status eq 'Work Order'")}`),
+  ]);
+  return [...(quotes || []), ...(workOrders || [])].filter((j) => String(j.active) !== "0");
 }
 
 // A job's actual tech-written notes (e.g. "No issues, paid cc") -- a

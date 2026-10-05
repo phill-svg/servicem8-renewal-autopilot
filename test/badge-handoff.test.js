@@ -32,10 +32,10 @@ test("plans a move to the newer job and clears the old one", () => {
   assert.equal(moves[0].dateChanged, true);
 });
 
-test("groups by company and address, exposing the due_customers natural key", () => {
+test("groups by property, exposing the due_customers address key and the latest job's card", () => {
   const moves = planBadgeMoves([job({ ...OLD, badges: [BADGE] }), job(NEW)], BADGE, WARRANTY);
   assert.equal(moves[0].companyUuid, "co1");
-  assert.equal(moves[0].addressKey, "1 test st");
+  assert.equal(moves[0].addressKey, "1 test street canberra");
 });
 
 test("does nothing when the latest job already carries the badge", () => {
@@ -66,8 +66,34 @@ test("a job at a different address does not take the badge", () => {
   assert.deepEqual(moves, []);
 });
 
-test("a job for a different company does not take the badge", () => {
+// One renewal per property: two people in one household often have their
+// own client cards (Elizabeth and Anna Zaja at 23 Joyner Crescent).
+test("a later job on another client card at the same address takes the badge", () => {
   const moves = planBadgeMoves([job({ ...OLD, badges: [BADGE] }), job({ ...NEW, company: "co2" })], BADGE, WARRANTY);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0].addTo.uuid, "new");
+  assert.equal(moves[0].companyUuid, "co2");
+});
+
+test("an abbreviated street type is the same property (Joyner Cr vs Crescent)", () => {
+  const moves = planBadgeMoves(
+    [
+      job({ ...OLD, badges: [BADGE], address: "23 Joyner Crescent\nFlynn ACT 2615" }),
+      job({ ...NEW, address: "23 Joyner Cr\nFlynn ACT 2615" }),
+    ],
+    BADGE,
+    WARRANTY
+  );
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0].addTo.uuid, "new");
+});
+
+test("the same street in another suburb does not take the badge", () => {
+  const moves = planBadgeMoves(
+    [job({ ...OLD, badges: [BADGE], address: "1 Smith St\nKambah ACT 2902" }), job({ ...NEW, company: "co2", address: "1 Smith St\nFlynn ACT 2615" })],
+    BADGE,
+    WARRANTY
+  );
   assert.deepEqual(moves, []);
 });
 
