@@ -296,14 +296,33 @@ function daysBetween(a, b) {
   return Math.floor((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
 }
 
-// "Due now" starts either once the exact due date has passed (up to
-// overdueGraceDays later, before flipping to "overdue"), OR as soon as the
-// due date falls within the next 1 month from today, even if the exact day
-// hasn't arrived yet -- a rolling window (today .. today+1 month), not tied
-// to calendar-month boundaries, so a renewal due early next month shows as
-// "due now" the same way one due late next month would once it's within a
-// month out.
-function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays, dueLaterLeadDays) {
+// "Due now" starts on the same day ServiceM8's own Job Reminder for the
+// customer lands in the Inbox (Phill, 2026-10-08: "when servicem8 gives me a
+// notification for a customer reminder that customer should be in our 'due
+// now' section"). ServiceM8's follow-up reminders recur "Every <due month> on
+// the first Monday" and arrive SM8_REMINDER_LEAD_DAYS before that Monday --
+// observed live: every customer due in November 2026 arrived on Monday
+// 5 October, 4 weeks before Monday 2 November. So everyone due in the same
+// month moves into "Due now" together, on that Monday.
+//
+// Compared as Sydney calendar dates: the nightly recompute runs at ~3am
+// Sydney, which is still the previous day in UTC, and would otherwise flip
+// customers a day after ServiceM8 instead of the same morning.
+const SM8_REMINDER_LEAD_DAYS = 28;
+
+// The YYYY-MM-DD "Due now" starts on, for a due date. dueDate's UTC fields
+// hold ServiceM8's account-local calendar date (see parseServiceM8Date).
+export function dueNowStartDate(dueDate) {
+  const y = dueDate.getUTCFullYear();
+  const m = dueDate.getUTCMonth();
+  const firstDow = new Date(Date.UTC(y, m, 1)).getUTCDay(); // 0 = Sunday
+  const firstMonday = 1 + ((8 - firstDow) % 7);
+  return isoDate(new Date(Date.UTC(y, m, firstMonday - SM8_REMINDER_LEAD_DAYS)));
+}
+
+// The due date itself passing also counts (up to overdueGraceDays later,
+// before flipping to "overdue").
+export function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMaxDays, dueLaterLeadDays) {
   const daysPastDue = daysBetween(dueDate, today);
 
   // Beyond overdueMaxDays past the due date, stop surfacing it at all --
@@ -312,7 +331,7 @@ function bucketFor(today, dueDate, dueSoonLeadDays, overdueGraceDays, overdueMax
 
   if (daysPastDue >= overdueGraceDays) return "overdue";
   if (daysPastDue >= 0) return "due";
-  if (dueDate <= addMonths(today, 1)) return "due";
+  if (sydneyNow(today).date >= dueNowStartDate(dueDate)) return "due";
 
   const dueSoonStart = addDays(dueDate, -dueSoonLeadDays);
   if (today >= dueSoonStart) return "due_soon";

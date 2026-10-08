@@ -53,6 +53,14 @@ a job. Design:
   merges rows that now collide (keeps the most recent). No manual migration needed.
 - Live preview before rollout: 9 properties merged, all genuine duplicates.
 
+## "Due now" timing = ServiceM8's reminder timing (changed 2026-10-08)
+- Phill wants a customer in "Due now" the same day ServiceM8's own Job Reminder for them arrives.
+  ServiceM8's follow-ups recur "Every <due month> on the first Monday" and land 4 weeks before that
+  Monday (Nov 2026 batch arrived Mon 5 Oct). So `dueNowStartDate` = first Monday of the due month
+  minus `SM8_REMINDER_LEAD_DAYS` (28), compared as Sydney dates so the 3am run flips them that Monday.
+- The 4 weeks is ServiceM8's Settings > Preferences > Recurring Jobs "weeks prior" -- if Phill changes
+  it there, change the constant too.
+
 ## Reminder wording (changed 2026-10-06)
 - Follow-up rounds 2/3 have two wordings: "coming up due / due very soon" before the due date, and
   "overdue" once past it (`isPastDue`, `FOLLOWUP_OVERDUE_TEMPLATES`, `buildFollowUpTexts`). Phill's call:
