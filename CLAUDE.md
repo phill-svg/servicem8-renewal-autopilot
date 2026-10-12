@@ -25,6 +25,11 @@ to customers.
 ## Crons
 - `0 16 * * *` (2-3am Canberra): nightly reconciliation -- badge sync, recompute, follow-up drafts.
 - `*/2 * * * *`: backfill chunks, token refresh, delivery verification, daily due digest.
+- **The nightly must finish inside Cloudflare's 15-minute cron limit.** From 2026-09-17 to 2026-10-12 it
+  was killed ~200 of 319 customers in (no `cron_runs` row = it didn't finish). Fix: `shouldRefreshDetails`
+  only re-reads contact + notes for new/changed rows, due soon/due/overdue (nightly), and everyone else
+  one night a week; the two reads run in parallel; follow-up drafting runs *before* the recompute.
+  Check health with `SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT 3`.
 
 ## Due notifications (added 2026-10-05)
 Phill asked to be notified "like the Reminders add-on" when a customer becomes due -- NOT as a task on

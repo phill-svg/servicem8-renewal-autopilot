@@ -265,9 +265,13 @@ async function runNightlyReconciliation(env) {
       // Before the recompute, not after: a customer serviced again since the
       // last run needs their badge on the newer job so the recompute picks up
       // the new date in this same pass rather than a day late.
+      // Follow-up drafting first: it only needs what's already stored, and
+      // running it after the (long) recompute meant a run cut off at the
+      // 15-minute cron limit skipped it entirely -- no round 2/3 drafts were
+      // made from 2026-09-17 until this was moved.
+      await generateFollowUpDraftsForTenant(env, tenant.servicem8_account_uuid);
       await reassignBadgesForTenant(env, tenant.servicem8_account_uuid);
       const { jobsScanned } = await recomputeAllCategoriesForTenant(env, tenant.servicem8_account_uuid);
-      await generateFollowUpDraftsForTenant(env, tenant.servicem8_account_uuid);
       await env.DB.prepare(
         `INSERT INTO cron_runs (id, tenant_id, started_at, finished_at, jobs_scanned, due_found, error)
          VALUES (?, ?, ?, ?, ?, NULL, NULL)`

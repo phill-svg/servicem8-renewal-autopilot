@@ -433,6 +433,23 @@ async function rekeyRowsForRule(env, tenantId, rule) {
   }
 }
 
+// Whether to re-read a customer's contact + job notes from ServiceM8 on this
+// pass. Always when the row is new, the job changed, or nothing is cached;
+// every night for customers staff are about to contact (due soon / due /
+// overdue -- so a corrected mobile shows up by the next morning); and once a
+// week for everyone else, spread across the days of the week by client card.
+const DETAIL_REFRESH_BUCKETS = new Set(["due_soon", "due", "overdue"]);
+export function shouldRefreshDetails(existing, job, bucket, today = new Date()) {
+  if (!existing || existing.last_job_uuid !== job.uuid) return true;
+  if (!existing.contact_name_cache || (!existing.contact_phone_cache && !existing.contact_email_cache)) return true;
+  if (DETAIL_REFRESH_BUCKETS.has(bucket)) return true;
+  const key = String(job.company_uuid || "");
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  const [y, m, d] = sydneyNow(today).date.split("-").map(Number);
+  return h % 7 === new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
 // Groups raw jobs by PROPERTY (normalized address, across client cards),
 // keeps the most-recently-completed job per property, and upserts a
 // candidate row -- shared by both the backfill path and the live
@@ -473,7 +490,8 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
 
     // Every row for this property, whichever client card it was created on.
     const { results: propertyRows } = await env.DB.prepare(
-      `SELECT id, servicem8_company_uuid, last_completed_at FROM due_customers WHERE tenant_id = ? AND address_key = ? AND category_config_id = ?`
+      `SELECT id, servicem8_company_uuid, last_completed_at, last_job_uuid, contact_name_cache, contact_phone_cache, contact_email_cache
+       FROM due_customers WHERE tenant_id = ? AND address_key = ? AND category_config_id = ?`
     )
       .bind(tenantId, addressKey, rule.id)
       .all();
@@ -513,12 +531,12 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     // property must suppress this one.
     const suppressedReason = openJobKeys && openJobKeys.has(addressKey) ? "open_pipeline_job" : null;
 
-    let contact = null;
-    try {
-      contact = await getPrimaryContact(env, tenantId, job.company_uuid);
-    } catch (err) {
-      console.error(`due-engine: contact lookup failed for company ${job.company_uuid}:`, err);
-    }
+    // Contact + notes are the slow part (2-3 ServiceM8 reads per customer).
+    // Re-reading them for every customer every night pushed the nightly run
+    // past Cloudflare's 15-minute cron limit (2026-09-17 onwards it was cut
+    // off ~200 customers in, and the follow-up drafting after it never ran).
+    // Skipped values stay as cached: the upsert never overwrites with blanks.
+    const refreshDetails = shouldRefreshDetails(existing, job, bucket, today);
 
     // Real tech notes for the "Show job" teaser (src/dashboard.js) -- most
     // recent note first, since that's usually the on-site wrap-up ("No
@@ -534,21 +552,31 @@ async function upsertJobsAsDueCandidates(env, tenantId, rule, jobs) {
     function looksLikeCallLog(note) {
       return /recording:|^agent:|^call from|missed call from client/i.test(note || "");
     }
-    let jobNotes = "";
-    try {
-      const notes = await listNotesForJob(env, tenantId, job.uuid);
-      if (Array.isArray(notes) && notes.length) {
-        // create_date, not timestamp -- confirmed live via /debug/raw once
-        // read_job_notes was granted; note.json has no `timestamp` field.
-        const realNotes = notes.filter(
-          (n) => n.edit_by_staff_uuid !== AIRCALL_INTEGRATION_STAFF_UUID && !looksLikeCallLog(n.note)
-        );
-        const sorted = [...realNotes].sort((a, b) => new Date(b.create_date || 0) - new Date(a.create_date || 0));
-        jobNotes = sorted[0]?.note || "";
-      }
-    } catch (err) {
-      console.error(`due-engine: notes lookup failed for job ${job.uuid}:`, err);
-    }
+    // Contact and notes are fetched side by side -- one round-trip of waiting
+    // per customer instead of two keeps the nightly run well inside its limit.
+    const [contact, jobNotes] = refreshDetails
+      ? await Promise.all([
+          getPrimaryContact(env, tenantId, job.company_uuid).catch((err) => {
+            console.error(`due-engine: contact lookup failed for company ${job.company_uuid}:`, err);
+            return null;
+          }),
+          listNotesForJob(env, tenantId, job.uuid)
+            .then((notes) => {
+              if (!Array.isArray(notes) || !notes.length) return "";
+              // create_date, not timestamp -- confirmed live via /debug/raw once
+              // read_job_notes was granted; note.json has no `timestamp` field.
+              const realNotes = notes.filter(
+                (n) => n.edit_by_staff_uuid !== AIRCALL_INTEGRATION_STAFF_UUID && !looksLikeCallLog(n.note)
+              );
+              const sorted = [...realNotes].sort((a, b) => new Date(b.create_date || 0) - new Date(a.create_date || 0));
+              return sorted[0]?.note || "";
+            })
+            .catch((err) => {
+              console.error(`due-engine: notes lookup failed for job ${job.uuid}:`, err);
+              return "";
+            }),
+        ])
+      : [null, ""];
 
     const now = Date.now();
     // RETURNING id -- ON CONFLICT DO UPDATE keeps the row's *original* id, not
