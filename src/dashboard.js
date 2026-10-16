@@ -5,7 +5,7 @@
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
 import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet, maybeCreateReminderDraft } from "./due-engine.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob, getJob } from "./servicem8-api.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob, getJob, listCompanyContacts, createJobContact } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -1073,6 +1073,7 @@ ${
           a.rel = 'noopener';
           a.textContent = 'open it in ServiceM8 to schedule';
           out.appendChild(a);
+          if (data.contactsCopied === false) out.appendChild(document.createTextNode(' (the contacts couldn\u2019t be copied onto it \u2014 add them in ServiceM8)'));
           btn.textContent = 'Job created';
           var row = card.closest('tr');
           if (row) row.classList.add('booked');
@@ -1213,6 +1214,40 @@ export function bookingBillingAddress(job, jobAddress) {
   return billing;
 }
 
+// The client card's contacts, copied onto the new job so its Contacts section
+// isn't empty. Each keeps its own type (Billing / Property Manager), and the
+// primary contact is also added as the Job Contact when the card has none.
+// Best-effort: the job already exists, so a failure here only means staff
+// add the contact by hand -- false tells the dashboard to say so.
+const JOB_CONTACT_TYPES = new Set(["JOB", "BILLING", "Property Manager"]);
+export function planJobContacts(companyContacts) {
+  const list = companyContacts || [];
+  const plan = list.map((c) => ({ ...c, type: JOB_CONTACT_TYPES.has(c.type) ? c.type : "JOB" }));
+  if (list.length && !plan.some((c) => c.type === "JOB")) plan.unshift({ ...list[0], type: "JOB" });
+  return plan;
+}
+async function copyContactsToJob(env, tenantId, companyUuid, jobUuid) {
+  try {
+    const plan = planJobContacts(await listCompanyContacts(env, tenantId, companyUuid));
+    for (const c of plan) {
+      await createJobContact(env, tenantId, {
+        jobUuid,
+        first: c.first,
+        last: c.last,
+        phone: c.phone,
+        mobile: c.mobile,
+        email: c.email,
+        type: c.type,
+        isPrimary: String(c.is_primary_contact) === "1",
+      });
+    }
+    return true;
+  } catch (err) {
+    console.error(`book job: could not copy contacts onto job ${jobUuid}`, err);
+    return false;
+  }
+}
+
 // The customer booked on the phone: create their next job in ServiceM8 and
 // take the row out of the queue now rather than at the 3am recompute (which
 // will keep it suppressed while the job is open, via listOpenJobs). The
@@ -1252,7 +1287,8 @@ export async function bookJobForCustomer(env, tenantId, dueCustomerId, descripti
   )
     .bind(Date.now(), job.jobNumber ? `Booked job #${job.jobNumber}` : "Booked a job", dueCustomerId)
     .run();
-  return { jobUuid: job.uuid, jobNumber: job.jobNumber };
+  const contactsCopied = await copyContactsToJob(env, tenantId, row.servicem8_company_uuid, job.uuid);
+  return { jobUuid: job.uuid, jobNumber: job.jobNumber, contactsCopied };
 }
 
 // Advances due_customers.reminder_round past whichever round was just sent

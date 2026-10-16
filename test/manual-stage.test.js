@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { recomputeCategory, generateFollowUpDraftsForTenant, normalizeStreet } from "../src/due-engine.js";
-import { renderDashboardHtml, setCustomerStage, bookJobForCustomer, approveAndSendDraft, MissingScopeError, bookingAddress, bookingBillingAddress } from "../src/dashboard.js";
+import { renderDashboardHtml, setCustomerStage, bookJobForCustomer, approveAndSendDraft, MissingScopeError, bookingAddress, bookingBillingAddress, planJobContacts } from "../src/dashboard.js";
 import { makeSqliteEnv } from "./helpers/sqlite-d1.js";
 
 // Staff can move a customer between stages by hand after phoning them, and
@@ -152,7 +152,7 @@ test("a new service cycle clears the manual stage", async () => {
 test("Book job creates a Work Order for the client at the property and takes them out of the queue", async () => {
   const { env, id } = await dueCustomer();
   const res = await bookJobForCustomer(env, "t", id, "General pest - booked after call");
-  assert.deepEqual(res, { jobUuid: "newjob-uuid", jobNumber: "1234" });
+  assert.deepEqual(res, { jobUuid: "newjob-uuid", jobNumber: "1234", contactsCopied: true });
   assert.equal(posts.length, 1);
   assert.deepEqual(posts[0], { status: "Work Order", company_uuid: "co1", job_address: "1 Test St\nHolt ACT 2615", billing_address: "1 Test St\nHolt ACT 2615", job_description: "General pest - booked after call", category_uuid: "cat1" });
   const r = row(env);
@@ -227,4 +227,45 @@ test("a typed address with no suburb keeps matching its property", () => {
 
 test("every rebuilt address is the same property as the typed one", () => {
   assert.equal(normalizeStreet(bookingAddress(JOB_693)), normalizeStreet(JOB_693.job_address));
+});
+
+// Job #1053 came out with an empty Contacts section: an API-created job
+// doesn't get the client's contacts the way one made in the app does.
+test("Book job copies the client's contacts onto the new job", async () => {
+  const { env, id } = await dueCustomer();
+  const contactPosts = [];
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === "POST" && String(url).endsWith("/jobcontact.json")) {
+      contactPosts.push(JSON.parse(init.body));
+      return new Response('{"errorCode":"0"}', { status: 200 });
+    }
+    return inner(url, init);
+  };
+  const res = await bookJobForCustomer(env, "t", id, "x");
+  assert.equal(res.contactsCopied, true);
+  assert.deepEqual(
+    contactPosts.map((c) => [c.job_uuid, c.type, c.first, c.mobile, c.email]),
+    [["newjob-uuid", "JOB", "Sam", "0412345678", "sam@example.com"]]
+  );
+});
+
+test("contacts keep their own type, and the primary is also the Job Contact", () => {
+  const plan = planJobContacts([
+    { first: "phill", type: "BILLING", is_primary_contact: "1", mobile: "0472762158" },
+    { first: "Agent", type: "Property Manager", is_primary_contact: "0" },
+  ]);
+  assert.deepEqual(plan.map((c) => [c.first, c.type]), [["phill", "JOB"], ["phill", "BILLING"], ["Agent", "Property Manager"]]);
+  assert.deepEqual(planJobContacts([]), []);
+});
+
+test("if the contacts can't be copied the job is still booked, and the dashboard is told", async () => {
+  const { env, id } = await dueCustomer();
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) =>
+    init.method === "POST" && String(url).endsWith("/jobcontact.json") ? new Response('{"error":"insufficient_scope"}', { status: 403 }) : inner(url, init);
+  const res = await bookJobForCustomer(env, "t", id, "x");
+  assert.equal(res.jobUuid, "newjob-uuid");
+  assert.equal(res.contactsCopied, false);
+  assert.equal(row(env).suppressed_reason, "open_pipeline_job");
 });
