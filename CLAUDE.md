@@ -98,7 +98,8 @@ a job. Design:
   "like the unsuccessful one", job #929). Never changes the property key (no suburb is added where none
   was typed). Billing = the same, unless the last job billed elsewhere.
 - An API-created job gets NO contacts (unlike one made in the app), so Book job copies the client card's
-  contacts onto it (`planJobContacts` / `createJobContact`, scope **`manage_job_contacts`**). Best-effort:
+  contacts onto it as Job Contacts, like the app does (`planJobContacts` / `createJobContact`, scope
+  **`manage_job_contacts`**). Best-effort:
   if it fails the job is still booked and the dashboard says to add the contact by hand.
 
 ## ServiceM8 API facts worth remembering

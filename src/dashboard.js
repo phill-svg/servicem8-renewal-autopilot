@@ -1215,16 +1215,13 @@ export function bookingBillingAddress(job, jobAddress) {
 }
 
 // The client card's contacts, copied onto the new job so its Contacts section
-// isn't empty. Each keeps its own type (Billing / Property Manager), and the
-// primary contact is also added as the Job Contact when the card has none.
-// Best-effort: the job already exists, so a failure here only means staff
-// add the contact by hand -- false tells the dashboard to say so.
-const JOB_CONTACT_TYPES = new Set(["JOB", "BILLING", "Property Manager"]);
+// isn't empty -- the way ServiceM8 does it for a job made in the app: each
+// client contact becomes a Job Contact (job #929: the card's one "Billing"
+// contact appears on the job once, as its Job Contact). A Property Manager
+// stays a Property Manager. Best-effort: the job already exists, so a failure
+// here only means staff add the contact by hand -- false tells the dashboard.
 export function planJobContacts(companyContacts) {
-  const list = companyContacts || [];
-  const plan = list.map((c) => ({ ...c, type: JOB_CONTACT_TYPES.has(c.type) ? c.type : "JOB" }));
-  if (list.length && !plan.some((c) => c.type === "JOB")) plan.unshift({ ...list[0], type: "JOB" });
-  return plan;
+  return (companyContacts || []).map((c) => ({ ...c, type: c.type === "Property Manager" ? "Property Manager" : "JOB" }));
 }
 async function copyContactsToJob(env, tenantId, companyUuid, jobUuid) {
   try {
