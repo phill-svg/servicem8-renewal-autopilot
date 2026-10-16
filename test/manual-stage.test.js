@@ -250,12 +250,14 @@ test("Book job copies the client's contacts onto the new job", async () => {
   );
 });
 
-test("contacts keep their own type, and the primary is also the Job Contact", () => {
+// Job #929, made in the app: the card's one contact (type BILLING) is on the
+// job once, as its Job Contact.
+test("each client contact becomes a Job Contact once, like a job made in the app", () => {
   const plan = planJobContacts([
     { first: "phill", type: "BILLING", is_primary_contact: "1", mobile: "0472762158" },
     { first: "Agent", type: "Property Manager", is_primary_contact: "0" },
   ]);
-  assert.deepEqual(plan.map((c) => [c.first, c.type]), [["phill", "JOB"], ["phill", "BILLING"], ["Agent", "Property Manager"]]);
+  assert.deepEqual(plan.map((c) => [c.first, c.type]), [["phill", "JOB"], ["Agent", "Property Manager"]]);
   assert.deepEqual(planJobContacts([]), []);
 });
 
