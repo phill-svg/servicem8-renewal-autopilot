@@ -10,7 +10,7 @@ import { getJob, listCategories, rawGet, getVendorName, sendPlatformSmsRaw, toE1
 import { registerAllWebhooks, captureRawDelivery, maybeHandleHandshake, parseWebhookPayload } from "./webhooks.js";
 import { backfillChunk, recomputeCategory, recomputeAllCategoriesForTenant, generateFollowUpDraftsForTenant, ensureRenewalBadges, dedupeRenewalBadges, migrateLegacyFollowUpBadges, verifyDeliveries, reassignBadgesForTenant, planBadgeMoves, normalizeStreet, RENEWAL_BADGES, sendDueDigests, sendDueDigestForTenant } from "./due-engine.js";
 import { verifyAddonJwt, createDashboardToken, verifyDashboardToken } from "./addon.js";
-import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer, markCustomerCalled } from "./dashboard.js";
+import { renderDashboardHtml, approveAndSendDraft, dismissDueCustomer, markCustomerCalled, setCustomerStage, bookJobForCustomer, MissingScopeError, MANUAL_STAGES } from "./dashboard.js";
 
 // ---- install / OAuth2 ------------------------------------------------
 
@@ -577,6 +577,43 @@ async function handleDashboardCalled(request, env) {
   }
 }
 
+async function handleDashboardStage(request, env) {
+  const { token, dueCustomerId, stage, note } = await readJson(request);
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
+  if (!dueCustomerId) return json({ error: "dueCustomerId required" }, { status: 400 });
+  if (!MANUAL_STAGES.includes(stage)) return json({ error: "unknown stage" }, { status: 400 });
+
+  try {
+    await setCustomerStage(env, tenantId, dueCustomerId, stage, note);
+    return json({ ok: true });
+  } catch (err) {
+    console.error(`dashboard set-stage failed for tenant ${tenantId}, due_customer ${dueCustomerId}`, err);
+    return json({ error: "could not move this customer right now" }, { status: 502 });
+  }
+}
+
+async function handleDashboardBook(request, env) {
+  const { token, dueCustomerId, description } = await readJson(request);
+  const tenantId = await verifyDashboardToken(env.SERVICEM8_APP_SECRET, token);
+  if (!tenantId) return json({ error: "invalid or expired token" }, { status: 401 });
+  if (!dueCustomerId) return json({ error: "dueCustomerId required" }, { status: 400 });
+
+  try {
+    const result = await bookJobForCustomer(env, tenantId, dueCustomerId, description);
+    return json({ ok: true, ...result });
+  } catch (err) {
+    console.error(`dashboard book-job failed for tenant ${tenantId}, due_customer ${dueCustomerId}`, err);
+    if (err instanceof MissingScopeError) {
+      return json(
+        { error: "Job Reminders doesn't have permission to create jobs yet. Update the add-on in ServiceM8 (reinstall it via /install), then try again." },
+        { status: 403 }
+      );
+    }
+    return json({ error: "Could not create the job in ServiceM8 right now -- please try again." }, { status: 502 });
+  }
+}
+
 // ---- admin routes ----------------------------------------------------------
 // Standing in for the Phase 2 setup wizard, which doesn't exist yet -- these
 // let us configure tracking rules and run the engine manually. Gated by
@@ -908,6 +945,8 @@ export default {
     if (pathname === "/dashboard/approve" && method === "POST") return handleDashboardApprove(request, env);
     if (pathname === "/dashboard/dismiss" && method === "POST") return handleDashboardDismiss(request, env);
     if (pathname === "/dashboard/called" && method === "POST") return handleDashboardCalled(request, env);
+    if (pathname === "/dashboard/stage" && method === "POST") return handleDashboardStage(request, env);
+    if (pathname === "/dashboard/book" && method === "POST") return handleDashboardBook(request, env);
 
     if (pathname === "/debug/badge-handoff" && method === "GET") return handleDebugBadgeHandoff(request, env);
     if (pathname === "/debug/rekey-addresses" && method === "GET") return handleDebugRekeyAddresses(request, env);

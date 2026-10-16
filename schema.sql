@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS due_customers (
   -- Daily due digest (migration 007): when this customer was announced in
   -- the morning Inbox + notification. NULL = not yet this cycle.
   due_notified_at          INTEGER,
+  -- Manual stage moves (migration 008): when staff last set the stage by hand
+  -- from the dashboard, and the note recorded with it. NULL = never this cycle.
+  manual_stage_at          INTEGER,
+  manual_stage_note        TEXT,
   UNIQUE(tenant_id, servicem8_company_uuid, address_key, category_config_id)
 );
 CREATE INDEX IF NOT EXISTS idx_due_customers_tenant_bucket ON due_customers(tenant_id, bucket);

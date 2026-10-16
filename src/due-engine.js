@@ -768,7 +768,7 @@ export function secondaryTemplateFor(templates, categoryUuid) {
   return null;
 }
 
-async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
+export async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
   const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
   const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
   const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
@@ -1271,7 +1271,7 @@ function archiveDraftsStatements(env, dueCustomerId) {
 async function startNewReminderCycle(env, dueCustomerId) {
   await env.DB.batch([
     ...archiveDraftsStatements(env, dueCustomerId),
-    env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL, dismissed_at = NULL, due_notified_at = NULL WHERE id = ?").bind(dueCustomerId),
+    env.DB.prepare("UPDATE due_customers SET reminder_round = 1, last_reminder_sent_at = NULL, called_at = NULL, dismissed_at = NULL, due_notified_at = NULL, manual_stage_at = NULL, manual_stage_note = NULL WHERE id = ?").bind(dueCustomerId),
   ]);
 }
 
