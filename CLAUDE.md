@@ -18,6 +18,9 @@ to customers.
   Keep `schema.sql` in sync (fresh installs + tests load it).
 - Tests: `npm test` (node:test; `test/helpers/sqlite-d1.js` fakes D1 with real SQLite, fetch is stubbed).
 - `manifest.json` uses CRLF line endings -- edit with `sed`, not tools that rewrite newlines.
+- **New OAuth scopes go in BOTH `manifest.json` and `OAUTH_SCOPES` (src/servicem8-oauth.js)** -- the
+  install link sends `OAUTH_SCOPES`, not the manifest (missed for publish_inbox/create_notifications/
+  create_jobs until 2026-10-16). `test/oauth-scopes.test.js` checks they match.
 - New OAuth scopes in `manifest.json` only take effect after updating the app in the ServiceM8
   developer portal AND reinstalling via `https://renewal-autopilot.phill-abb.workers.dev/install`.
 - Admin debug routes take `X-Admin-Key` / `?adminKey=` = the app secret.

@@ -22,7 +22,10 @@ const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
 // email.json is better still -- it carries explicit `bounced` and `opened`
 // flags. Tenants authorized before these scopes were added must re-connect
 // before verification can run; the sweep degrades gracefully until then.
-export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email read_sms read_email read_job_notes vendor";
+// publish_inbox / create_notifications: the daily due digest. create_jobs:
+// the dashboard's "Book job". This is the list the install link actually
+// asks for -- manifest.json's scope must match it (test/oauth-scopes.test.js).
+export const OAUTH_SCOPES = "read_jobs manage_jobs read_job_categories read_customers read_customer_contacts manage_customer_contacts manage_badges publish_sms publish_email read_sms read_email read_job_notes vendor publish_inbox create_notifications create_jobs";
 
 export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   const url = new URL(AUTHORIZE_URL);
