@@ -252,9 +252,12 @@ const BACKFILL_CHUNK_DAYS = 180; // ~6 months per chunk, keeps each API call and
 // "23 Joyner Crescent", and the two never matched, so Elizabeth stayed
 // "due" after she'd already been serviced.
 //
-//   - newlines/commas become spaces: the suburb + postcode stay in the key.
-//     With matching across client cards, the suburb is what keeps
+//   - newlines/commas become spaces: the suburb stays in the key. With
+//     matching across client cards, the suburb is what keeps
 //     "1 Smith St, Kambah" apart from "1 Smith St, Flynn".
+//   - a trailing postcode is dropped (2026-10-16): jobs typed as
+//     "12/26 cynthea Teague crescent greenway" and "... Greenway ACT 2900"
+//     are the same property, and the suburb already does the separating.
 //   - street types are expanded (Cr/Cres -> crescent, St -> street, ...).
 //   - state, country and "unit" words are dropped; they vary by who typed it.
 //   - the slash is KEPT: stripping it turned "2/9 Hopman Pl" into
@@ -278,6 +281,7 @@ export function normalizeStreet(addr) {
     .split(/\s+/)
     .filter((w) => w && !DROPPED_WORDS.has(w))
     .map((w) => STREET_TYPES[w] || w)
+    .filter((w, i, all) => !(i === all.length - 1 && all.length >= 3 && /^\d{4}$/.test(w)))
     .join(" ");
 }
 

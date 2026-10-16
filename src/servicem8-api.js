@@ -219,7 +219,7 @@ export async function updateJobBadges(env, tenantId, jobUuid, badgesArray) {
 // dashboard's "Book job"). Needs the create_jobs scope -- manage_jobs only
 // covers updates. Returns { uuid, jobNumber }; the number is read back
 // because ServiceM8 assigns generated_job_id itself.
-export async function createJob(env, tenantId, { companyUuid, jobAddress, categoryUuid, description }) {
+export async function createJob(env, tenantId, { companyUuid, jobAddress, billingAddress, categoryUuid, description }) {
   const token = await getValidAccessToken(env, tenantId);
   const res = await fetch(`${API_BASE}/job.json`, {
     method: "POST",
@@ -228,6 +228,7 @@ export async function createJob(env, tenantId, { companyUuid, jobAddress, catego
       status: "Work Order",
       company_uuid: companyUuid,
       job_address: jobAddress || "",
+      ...(billingAddress ? { billing_address: billingAddress } : {}),
       job_description: description || "",
       ...(categoryUuid ? { category_uuid: categoryUuid } : {}),
     }),
@@ -375,6 +376,30 @@ export async function getCompany(env, tenantId, companyUuid) {
 // company name rather than leaving it blank (which the dashboard renders as
 // "Unknown"). Only fetches the company in that fallback case, to avoid an
 // extra API call per customer on every recompute.
+// Every active contact on a client card, primary first.
+export async function listCompanyContacts(env, tenantId, companyUuid) {
+  const contacts = await sm8Fetch(env, tenantId, `/companycontact.json?${odataFilter(`company_uuid eq '${companyUuid}'`)}`);
+  return (Array.isArray(contacts) ? contacts : [])
+    .filter((c) => String(c.active) !== "0")
+    .sort((a, b) => Number(String(b.is_primary_contact) === "1") - Number(String(a.is_primary_contact) === "1"));
+}
+
+// A contact on one job (the job card's Contacts section). A job created
+// through the API starts with none -- unlike one made in the app, ServiceM8
+// doesn't copy the client's contacts across. Needs manage_job_contacts.
+export async function createJobContact(env, tenantId, { jobUuid, first, last, phone, mobile, email, type, isPrimary }) {
+  return sm8PostJson(env, tenantId, `/jobcontact.json`, {
+    job_uuid: jobUuid,
+    first: first || "",
+    last: last || "",
+    phone: phone || "",
+    mobile: mobile || "",
+    email: email || "",
+    type,
+    is_primary_contact: isPrimary ? "1" : "0",
+  });
+}
+
 export async function getPrimaryContact(env, tenantId, companyUuid) {
   const contacts = await sm8Fetch(env, tenantId, `/companycontact.json?${odataFilter(`company_uuid eq '${companyUuid}'`)}`);
   const list = Array.isArray(contacts) ? contacts : [];

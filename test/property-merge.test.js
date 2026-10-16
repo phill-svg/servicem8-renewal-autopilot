@@ -30,7 +30,7 @@ function job(uuid, company, address, completion_date) {
 
 const CRESCENT = "23 Joyner Crescent\nFlynn ACT 2615";
 const CR = "23 Joyner Cr\nFlynn ACT 2615";
-const KEY = "23 joyner crescent flynn 2615";
+const KEY = "23 joyner crescent flynn";
 
 // Stubs ServiceM8: completed jobs come from `jobs`, open ones from `openJobs`.
 let jobs = [];
