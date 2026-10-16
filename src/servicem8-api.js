@@ -215,6 +215,37 @@ export async function updateJobBadges(env, tenantId, jobUuid, badgesArray) {
   return sm8PostJson(env, tenantId, `/job/${jobUuid}.json`, { badges: JSON.stringify(badgesArray) });
 }
 
+// A new Work Order for a customer who booked after a phone call (the
+// dashboard's "Book job"). Needs the create_jobs scope -- manage_jobs only
+// covers updates. Returns { uuid, jobNumber }; the number is read back
+// because ServiceM8 assigns generated_job_id itself.
+export async function createJob(env, tenantId, { companyUuid, jobAddress, categoryUuid, description }) {
+  const token = await getValidAccessToken(env, tenantId);
+  const res = await fetch(`${API_BASE}/job.json`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      status: "Work Order",
+      company_uuid: companyUuid,
+      job_address: jobAddress || "",
+      job_description: description || "",
+      ...(categoryUuid ? { category_uuid: categoryUuid } : {}),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 API POST /job.json failed for tenant ${tenantId}: ${res.status} ${await res.text()}`);
+  }
+  const uuid = res.headers.get("x-record-uuid");
+  if (!uuid) throw new Error("ServiceM8 POST /job.json returned no record UUID");
+  let jobNumber = null;
+  try {
+    jobNumber = (await getJob(env, tenantId, uuid))?.generated_job_id || null;
+  } catch (err) {
+    console.error(`servicem8-api: created job ${uuid} but could not read its number`, err);
+  }
+  return { uuid, jobNumber };
+}
+
 // All jobs regardless of status -- badges can be applied to jobs in any
 // status (Quote, Work Order, Completed), not just Completed ones, so the
 // due-detection engine's listAllCompletedJobs (status-filtered) isn't

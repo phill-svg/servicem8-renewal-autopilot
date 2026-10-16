@@ -4,8 +4,8 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
-import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet } from "./due-engine.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany } from "./servicem8-api.js";
+import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet, maybeCreateReminderDraft } from "./due-engine.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -269,7 +269,10 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const everSent = drafts.some((d) => d.status === "sent");
       // Computed here rather than beside the tab/style code below because the
       // next-reminder chip needs it while draftHtml is still being built.
-      const alreadyContacted = everSent && !pendingChannels.length;
+      // A stage set by hand ("Move to...") counts as contacted too -- a phone
+      // call leaves no sent draft behind.
+      const manuallyContacted = !!r.manual_stage_at && currentRound >= 2;
+      const alreadyContacted = (everSent || manuallyContacted) && !pendingChannels.length;
       // For the "sent" chip: whichever channel(s) went out in the most recently
       // completed round.
       const sentRounds = drafts.filter((d) => d.status === "sent").map((d) => d.round || 1);
@@ -357,7 +360,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       let draftHtml;
       if (!composerChannels.length) {
         // Nothing left to send -- just show what's gone out (or nothing yet).
-        draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length ? "" : `<div class="draft-none">No draft yet</div>`)) + nextNote;
+        draftHtml = failedNote + firstContactNote + (sentNote || (drafts.length || r.manual_stage_at ? "" : `<div class="draft-none">No draft yet</div>`)) + nextNote;
       } else {
         // alt_draft_body is only set when the category has a meaningful
         // second option (see secondaryTemplateFor in due-engine.js) --
@@ -419,6 +422,31 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
       const statusLabel = needsCall ? (r.called_at ? "Called" : STYLE.call.label) : alreadyContacted ? `Contacted ${contactedRound}` : s.label;
 
       const searchKey = `${r.contact_name_cache || ""} ${r.address_display || ""} ${r.contact_phone_cache || ""}`.toLowerCase();
+      // "Set by hand" chip, only while it's the latest thing that happened --
+      // once a reminder is sent after it, the sent chips tell the story.
+      const lastSentAt = sentDrafts.reduce((m, d) => Math.max(m, Number(d.sent_at) || 0), 0);
+      const manualNote =
+        r.manual_stage_at && Number(r.manual_stage_at) > lastSentAt
+          ? `<div class="sent-row"><span class="manual-chip" title="Set by hand from this dashboard ${escapeHtml(formatEpochAu(r.manual_stage_at, AU_DATETIME_FMT))} (${escapeHtml(agoText(r.manual_stage_at))})">&#9995; Set by hand ${escapeHtml(formatEpochAu(r.manual_stage_at))}${r.manual_stage_note ? ` &middot; ${escapeHtml(r.manual_stage_note)}` : ""}</span></div>`
+          : "";
+      const currentStage = tabBucket === "contacted1" || tabBucket === "contacted2" || tabBucket === "call" || tabBucket === "called" ? tabBucket : "due";
+      const stageOptions = MANUAL_STAGE_OPTIONS.map(
+        ([value, label]) => `<option value="${value}"${value === currentStage ? " disabled" : ""}>${escapeHtml(label)}${value === currentStage ? " (now)" : ""}</option>`
+      ).join("");
+      const serviceForJob = r.service_name && r.service_name !== "Unknown" ? r.service_name : "Pest treatment";
+      const rowTools = `<div class="row-tools">
+          <select class="stage-dd" data-stage-row="${escapeHtml(r.id)}" aria-label="Move this customer to another stage"><option value="">Move to&hellip;</option>${stageOptions}</select>
+          <details class="book-wrap">
+            <summary class="book-toggle">${IC_CAL}<span>Book job</span></summary>
+            <div class="book-card" data-book-row="${escapeHtml(r.id)}">
+              <div class="book-hint">Creates a new Work Order in ServiceM8 for this client at ${escapeHtml((r.address_display || "this address").replace(/\s*\n\s*/g, ", "))}. Schedule it in ServiceM8 afterwards.</div>
+              <textarea class="book-desc">${escapeHtml(`${serviceForJob} - booked from Job Reminders after phone call`)}</textarea>
+              <button type="button" class="book-btn">Create job in ServiceM8</button>
+              <div class="book-result"></div>
+            </div>
+          </details>
+        </div>`;
+
       const html = `<tr class="job-row" data-service="${escapeHtml(r.service_name)}" data-plan="${escapeHtml(r.plan_months ? String(r.plan_months) : "")}" data-row-id="${escapeHtml(r.id)}" data-bucket="${escapeHtml(tabBucket)}" data-name="${escapeHtml(searchKey)}" data-company="${escapeHtml(r.servicem8_company_uuid || "")}"${focusIds.has(r.id) ? ' data-focus="1"' : ""} style="--accent:${s.accent};--rowbg:${s.bg};">
         <td class="c-status"><span class="pill" style="background:${s.pillBg};color:${s.pillFg};"><i class="dot" style="background:${s.accent};"></i>${escapeHtml(statusLabel)}</span></td>
         <td class="c-customer">
@@ -433,7 +461,8 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
                 }`
               : ""
           }
-          ${draftHtml}
+          ${manualNote}${draftHtml}
+          ${rowTools}
         </td>
         <td class="c-service"><span class="svc-tag">${escapeHtml(r.service_name || "Unknown")}</span></td>
         <td class="c-date">
@@ -616,6 +645,24 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   .called-btn:hover:not(:disabled) { background: #f5f3ff; }
   .called-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: #5b21b6; background: #ede9fe; border: 1px solid #ddd6fe; border-radius: 999px; padding: 3px 10px; }
   .next-chip.warn .ic { color: #b45309; }
+  .manual-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650; color: #3730a3; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px; padding: 3px 10px; cursor: help; }
+  .row-tools { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+  .stage-dd { font-size: 12px; font-weight: 600; color: var(--ink-2); background: #fff; border: 1px solid var(--line-2); border-radius: 8px; padding: 5px 8px; cursor: pointer; }
+  .stage-dd:hover { border-color: #cbd5e1; }
+  .book-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 5px 11px; user-select: none; }
+  .book-toggle::-webkit-details-marker { display: none; }
+  .book-toggle:hover { background: #dcfce7; }
+  .book-card { margin-top: 6px; padding: 10px; background: #fbfcfd; border: 1px solid var(--line-2); border-radius: 10px; max-width: 470px; }
+  .book-hint { font-size: 11.5px; color: var(--muted); margin-bottom: 7px; line-height: 1.4; }
+  .book-desc { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 8px; min-height: 3.6em; resize: vertical; margin-bottom: 8px; }
+  .book-btn { background: #16a34a; color: #fff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+  .book-btn:hover:not(:disabled) { background: #15803d; }
+  .book-btn:disabled { opacity: .6; cursor: default; }
+  .book-result { margin-top: 7px; font-size: 12.5px; font-weight: 600; }
+  .book-result.ok { color: #166534; }
+  .book-result.err { color: #991b1b; }
+  .book-result a { color: inherit; }
+  .job-row.booked td { opacity: .55; }
   .draft-wrap { margin-top: 8px; }
   .draft-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 6px 11px; user-select: none; transition: background .12s; }
   .draft-toggle::-webkit-details-marker { display: none; }
@@ -976,6 +1023,78 @@ ${
     });
   });
 
+  // Manual stage move. The note is what gets recorded beside the date, e.g.
+  // "Contacted by phone" -- cancelling the prompt cancels the move.
+  var stageNoteDefaults = ${scriptJson(Object.fromEntries(MANUAL_STAGE_OPTIONS.map(([v, , note]) => [v, note])))};
+  document.querySelectorAll('.stage-dd').forEach(function (sel) {
+    sel.addEventListener('change', async function () {
+      var stage = sel.value;
+      if (!stage) return;
+      var note = prompt('Note to record with this move (optional)', stageNoteDefaults[stage] || '');
+      if (note === null) { sel.value = ''; return; }
+      sel.disabled = true;
+      try {
+        const res = await fetch('/dashboard/stage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: sel.dataset.stageRow, stage: stage, note: note }),
+        });
+        if (res.ok) { location.reload(); } else { alert('Could not move this customer -- please try again.'); sel.value = ''; sel.disabled = false; }
+      } catch (e) { alert('Could not move this customer -- please try again.'); sel.value = ''; sel.disabled = false; }
+    });
+  });
+
+  // Book job: creates the Work Order in ServiceM8 and takes the row out of
+  // the queue (it's an open booking now). The row stays on screen, greyed,
+  // with a link to the new job until the page is next loaded.
+  document.querySelectorAll('.book-card').forEach(function (card) {
+    var btn = card.querySelector('.book-btn');
+    var out = card.querySelector('.book-result');
+    btn.addEventListener('click', async function () {
+      btn.disabled = true;
+      btn.textContent = 'Creating job...';
+      out.className = 'book-result';
+      out.textContent = '';
+      try {
+        const res = await fetch('/dashboard/book', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: card.dataset.bookRow, description: card.querySelector('.book-desc').value }),
+        });
+        var data = {};
+        try { data = await res.json(); } catch (e) {}
+        if (res.ok && data.jobUuid) {
+          out.className = 'book-result ok';
+          out.innerHTML = '';
+          out.appendChild(document.createTextNode((data.jobNumber ? 'Job #' + data.jobNumber : 'Job') + ' created \u2014 '));
+          var a = document.createElement('a');
+          a.href = 'https://go.servicem8.com/OpenJob/' + encodeURIComponent(data.jobUuid);
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.textContent = 'open it in ServiceM8 to schedule';
+          out.appendChild(a);
+          btn.textContent = 'Job created';
+          var row = card.closest('tr');
+          if (row) row.classList.add('booked');
+        } else if (res.ok && data.alreadyBooked) {
+          out.className = 'book-result ok';
+          out.textContent = 'A job is already booked for this customer.';
+          btn.textContent = 'Already booked';
+        } else {
+          out.className = 'book-result err';
+          out.textContent = data.error || 'Could not create the job -- please try again.';
+          btn.textContent = 'Create job in ServiceM8';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        out.className = 'book-result err';
+        out.textContent = 'Could not create the job -- please try again.';
+        btn.textContent = 'Create job in ServiceM8';
+        btn.disabled = false;
+      }
+    });
+  });
+
   document.querySelectorAll('.dismiss-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
       var rowId = btn.dataset.dismiss;
@@ -1019,6 +1138,80 @@ export async function markCustomerCalled(env, tenantId, dueCustomerId) {
   await env.DB.prepare("UPDATE due_customers SET called_at = ? WHERE id = ? AND tenant_id = ?")
     .bind(Date.now(), dueCustomerId, tenantId)
     .run();
+}
+
+// "Move to..." stages: [value, menu label, default note]. Each maps onto the
+// state the tabs are already derived from (see the row logic in
+// renderDashboardHtml): reminder_round = the next round to send, called_at
+// for Called. "Contacted 3" lands in Call customer because that's where a row
+// goes once its third reminder is out.
+const MANUAL_STAGE_OPTIONS = [
+  ["due", "Due (not contacted)", "Moved back to due"],
+  ["contacted1", "Contacted 1", "Contacted by phone"],
+  ["contacted2", "Contacted 2", "Contacted by phone"],
+  ["call", "Contacted 3 / Call customer", "Contacted by phone"],
+  ["called", "Called", "Called"],
+];
+const STAGE_STATE = { due: { round: 1 }, contacted1: { round: 2 }, contacted2: { round: 3 }, call: { round: 4 }, called: { round: 4, called: true } };
+export const MANUAL_STAGES = Object.keys(STAGE_STATE);
+
+// Staff moved a customer by hand (usually after phoning them). Sets the
+// round/call state and records when + the note. Drafts that no longer fit
+// are archived: anything unsent belongs to the old stage, and every draft
+// from the new round onwards has to go so UNIQUE(due_customer_id, channel,
+// round) lets the nightly draft those rounds again -- the follow-ups then
+// carry on from this stage on their usual schedule. Back to Due starts the
+// chase over with fresh round-1 drafts.
+export async function setCustomerStage(env, tenantId, dueCustomerId, stage, note) {
+  const state = STAGE_STATE[stage];
+  if (!state) throw new Error(`unknown stage ${stage}`);
+  const row = await env.DB.prepare("SELECT id FROM due_customers WHERE id = ? AND tenant_id = ?").bind(dueCustomerId, tenantId).first();
+  if (!row) throw new Error("customer not found for this tenant");
+  const now = Date.now();
+  const text = String(note ?? "").trim().slice(0, 200) || MANUAL_STAGE_OPTIONS.find(([v]) => v === stage)[2];
+  const stale = "due_customer_id = ? AND (status IN ('pending', 'failed') OR round >= ?)";
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO reminder_drafts_archive SELECT * FROM reminder_drafts WHERE ${stale}`).bind(dueCustomerId, state.round),
+    env.DB.prepare(`DELETE FROM reminder_drafts WHERE ${stale}`).bind(dueCustomerId, state.round),
+    env.DB.prepare(
+      "UPDATE due_customers SET reminder_round = ?, called_at = ?, last_reminder_sent_at = ?, manual_stage_at = ?, manual_stage_note = ? WHERE id = ? AND tenant_id = ?"
+    ).bind(state.round, state.called ? now : null, state.round > 1 ? now : null, now, text, dueCustomerId, tenantId),
+  ]);
+  if (state.round === 1) await maybeCreateReminderDraft(env, tenantId, dueCustomerId);
+}
+
+// The customer booked on the phone: create their next job in ServiceM8 and
+// take the row out of the queue now rather than at the 3am recompute (which
+// will keep it suppressed while the job is open, via listOpenJobs). The
+// claim on suppressed_reason makes a double click book one job, not two.
+export class MissingScopeError extends Error {}
+export async function bookJobForCustomer(env, tenantId, dueCustomerId, description) {
+  const row = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ? AND tenant_id = ?").bind(dueCustomerId, tenantId).first();
+  if (!row) throw new Error("customer not found for this tenant");
+  const claim = await env.DB.prepare("UPDATE due_customers SET suppressed_reason = 'booking' WHERE id = ? AND suppressed_reason IS NULL")
+    .bind(dueCustomerId)
+    .run();
+  if (!claim?.meta?.changes) return { alreadyBooked: true };
+
+  let job;
+  try {
+    job = await createJob(env, tenantId, {
+      companyUuid: row.servicem8_company_uuid,
+      jobAddress: row.address_display,
+      categoryUuid: row.servicem8_category_uuid,
+      description: String(description || "").trim() || "Booked from Job Reminders after phone call",
+    });
+  } catch (err) {
+    await env.DB.prepare("UPDATE due_customers SET suppressed_reason = NULL WHERE id = ? AND suppressed_reason = 'booking'").bind(dueCustomerId).run();
+    if (/\b403\b|insufficient_scope/i.test(String(err && err.message))) throw new MissingScopeError(String(err.message));
+    throw err;
+  }
+  await env.DB.prepare(
+    "UPDATE due_customers SET suppressed_reason = 'open_pipeline_job', manual_stage_at = ?, manual_stage_note = ? WHERE id = ?"
+  )
+    .bind(Date.now(), job.jobNumber ? `Booked job #${job.jobNumber}` : "Booked a job", dueCustomerId)
+    .run();
+  return { jobUuid: job.uuid, jobNumber: job.jobNumber };
 }
 
 // Advances due_customers.reminder_round past whichever round was just sent

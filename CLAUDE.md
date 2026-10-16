@@ -74,6 +74,21 @@ a job. Design:
   dashboard load), but only when the stored text exactly equals what we generated. Staff edits only reach
   the DB at send time, so pending text is ours.
 
+## Manual stages + Book job (added 2026-10-16)
+- Each dashboard row has **Move to...** (Due / Contacted 1 / Contacted 2 / Contacted 3-Call customer /
+  Called) for customers phoned by hand. It's `setCustomerStage` in `src/dashboard.js`, which maps each stage
+  onto the existing state: `reminder_round` 1/2/3/4, plus `called_at` for Called. "Contacted 3" lands in
+  Call customer, which is where rows already go after the 3rd reminder.
+  `due_customers.manual_stage_at` / `manual_stage_note` record when and the note (migration 008).
+  A stage set by hand counts as "contacted" even with no sent draft.
+- A move archives unsent drafts and every draft from the new round on, so the nightly re-drafts those
+  rounds on its normal schedule. Back to Due rebuilds the round-1 drafts. A new service cycle clears the
+  manual fields.
+- **Book job** (`bookJobForCustomer`) POSTs a Work Order to `/job.json` for the row's client, address and
+  category, then suppresses the row (`open_pipeline_job`). It needs the **`create_jobs`** scope;
+  `manage_jobs` doesn't cover creating jobs. The renewal badge moves onto the new job via the normal
+  hand-off once it's completed.
+
 ## ServiceM8 API facts worth remembering
 - API docs index: https://developer.servicem8.com/llms.txt (reference pages are `<name>.md`).
 - Messaging API (SMS/email) lives at the API root, not under `/api_1.0`.
