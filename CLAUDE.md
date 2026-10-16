@@ -54,8 +54,9 @@ a job. Design:
   property key, and the engine, badge hand-off and open-booking suppression all group by it alone.
   Phill's call: any completed non-warranty job at the address (any card, any job type) resets it.
 - The key is canonical: street types expanded (Cr/Cres -> crescent, St -> street, Pl -> place...),
-  state/country/"unit" dropped, suburb + postcode KEPT (stops "1 Smith St" in two suburbs merging),
-  unit slash kept ("2/9" != "29"). Why: online bookings write "23 Joyner Cr" vs "23 Joyner Crescent",
+  state/country/"unit" and a trailing postcode dropped, suburb KEPT (stops "1 Smith St" in two suburbs
+  merging), unit slash kept ("2/9" != "29"). Postcode dropped 2026-10-16: most of phill johnston's jobs
+  say "...greenway", one says "...Greenway ACT 2900". Live preview: 1 merge (Kathryn Market, a real duplicate). Why: online bookings write "23 Joyner Cr" vs "23 Joyner Crescent",
   so Elizabeth Zaja stayed "due" after being serviced.
 - Changing `normalizeStreet` is safe: `rekeyRowsForRule` re-keys stored rows on the next recompute and
   merges rows that now collide (keeps the most recent). No manual migration needed.
@@ -91,6 +92,11 @@ a job. Design:
   category, then suppresses the row (`open_pipeline_job`). It needs the **`create_jobs`** scope;
   `manage_jobs` doesn't cover creating jobs. The renewal badge moves onto the new job via the normal
   hand-off once it's completed.
+- The booked job's address is `bookingAddress`: the last job's text if it already ends in a postcode,
+  otherwise rebuilt from that job's ServiceM8 geocode (`geo_number`/`geo_street`/`geo_city`/...), e.g.
+  "12/26 cynthea Teague crescent greenway" -> "12/26 Cynthea Teague Crescent\nGreenway ACT 2900" (Phill:
+  "like the unsuccessful one", job #929). Never changes the property key (no suburb is added where none
+  was typed). Billing = the same, unless the last job billed elsewhere.
 
 ## ServiceM8 API facts worth remembering
 - API docs index: https://developer.servicem8.com/llms.txt (reference pages are `<name>.md`).

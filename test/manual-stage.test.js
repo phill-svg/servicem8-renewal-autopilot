@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { recomputeCategory, generateFollowUpDraftsForTenant } from "../src/due-engine.js";
-import { renderDashboardHtml, setCustomerStage, bookJobForCustomer, approveAndSendDraft, MissingScopeError } from "../src/dashboard.js";
+import { recomputeCategory, generateFollowUpDraftsForTenant, normalizeStreet } from "../src/due-engine.js";
+import { renderDashboardHtml, setCustomerStage, bookJobForCustomer, approveAndSendDraft, MissingScopeError, bookingAddress, bookingBillingAddress } from "../src/dashboard.js";
 import { makeSqliteEnv } from "./helpers/sqlite-d1.js";
 
 // Staff can move a customer between stages by hand after phoning them, and
@@ -154,7 +154,7 @@ test("Book job creates a Work Order for the client at the property and takes the
   const res = await bookJobForCustomer(env, "t", id, "General pest - booked after call");
   assert.deepEqual(res, { jobUuid: "newjob-uuid", jobNumber: "1234" });
   assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0], { status: "Work Order", company_uuid: "co1", job_address: "1 Test St\nHolt ACT 2615", job_description: "General pest - booked after call", category_uuid: "cat1" });
+  assert.deepEqual(posts[0], { status: "Work Order", company_uuid: "co1", job_address: "1 Test St\nHolt ACT 2615", billing_address: "1 Test St\nHolt ACT 2615", job_description: "General pest - booked after call", category_uuid: "cat1" });
   const r = row(env);
   assert.equal(r.suppressed_reason, "open_pipeline_job");
   assert.equal(r.manual_stage_note, "Booked job #1234");
@@ -174,4 +174,57 @@ test("without the create_jobs permission: a clear error and the row stays in the
   jobCreateStatus = 403;
   await assert.rejects(bookJobForCustomer(env, "t", id, "x"), MissingScopeError);
   assert.equal(row(env).suppressed_reason, null);
+});
+
+// Job #1053, 2026-10-16: booked from #693, whose address was typed as
+// "12/26 cynthea Teague crescent greenway", so the new job had no postcode.
+// ServiceM8 had geocoded it; the booking uses that, shaped like job #929.
+const JOB_693 = {
+  job_address: "12/26 cynthea Teague crescent greenway",
+  billing_address: "12/26 cynthea Teague crescent greenway",
+  geo_is_valid: 1, geo_number: "26", geo_street: "Cynthea Teague Crescent", geo_city: "Greenway", geo_state: "ACT", geo_postcode: "2900",
+};
+
+test("a booking gets the full address with its postcode, like a properly typed job", () => {
+  const addr = bookingAddress(JOB_693);
+  assert.equal(addr, "12/26 Cynthea Teague Crescent\nGreenway ACT 2900");
+  assert.equal(bookingBillingAddress(JOB_693, addr), addr, "billing follows the job address");
+});
+
+test("an address that already has its postcode is used as it is", () => {
+  const job = { ...JOB_693, job_address: "4/9 Troughton St\nHolt ACT 2615", billing_address: "4/9 Troughton St\nHolt ACT 2615" };
+  assert.equal(bookingAddress(job), "4/9 Troughton St\nHolt ACT 2615");
+});
+
+test("a geocode that isn't clearly this address is not used", () => {
+  assert.equal(bookingAddress({ ...JOB_693, geo_number: "28" }), JOB_693.job_address, "different street number");
+  assert.equal(bookingAddress({ ...JOB_693, geo_street: "Other Street" }), JOB_693.job_address, "different street");
+  assert.equal(bookingAddress({ ...JOB_693, geo_is_valid: 0 }), JOB_693.job_address, "not geocoded");
+  assert.equal(bookingAddress(null, "5 Smith St"), "5 Smith St", "no job to read");
+});
+
+test("billing somewhere else (a property manager) is kept", () => {
+  const job = { ...JOB_693, billing_address: "PO Box 12\nBelconnen ACT 2617" };
+  assert.equal(bookingBillingAddress(job, "anything"), "PO Box 12\nBelconnen ACT 2617");
+});
+
+test("Book job sends the rebuilt address and billing address to ServiceM8", async () => {
+  const { env, id } = await dueCustomer();
+  env.db.prepare("UPDATE due_customers SET last_job_uuid = 'j693'").run();
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes("/job/j693.json") ? new Response(JSON.stringify(JOB_693), { status: 200 }) : inner(url, init));
+  await bookJobForCustomer(env, "t", id, "x");
+  assert.equal(posts[0].job_address, "12/26 Cynthea Teague Crescent\nGreenway ACT 2900");
+  assert.equal(posts[0].billing_address, "12/26 Cynthea Teague Crescent\nGreenway ACT 2900");
+});
+
+test("a typed address with no suburb keeps matching its property", () => {
+  const job = { ...JOB_693, job_address: "4/9 Troughton St", geo_number: "9", geo_street: "Troughton Street", geo_city: "Banks", geo_postcode: "2906" };
+  const addr = bookingAddress(job);
+  assert.equal(addr, "4/9 Troughton St\nACT 2906");
+  assert.equal(normalizeStreet(addr), normalizeStreet(job.job_address));
+});
+
+test("every rebuilt address is the same property as the typed one", () => {
+  assert.equal(normalizeStreet(bookingAddress(JOB_693)), normalizeStreet(JOB_693.job_address));
 });

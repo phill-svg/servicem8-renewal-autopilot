@@ -219,7 +219,7 @@ export async function updateJobBadges(env, tenantId, jobUuid, badgesArray) {
 // dashboard's "Book job"). Needs the create_jobs scope -- manage_jobs only
 // covers updates. Returns { uuid, jobNumber }; the number is read back
 // because ServiceM8 assigns generated_job_id itself.
-export async function createJob(env, tenantId, { companyUuid, jobAddress, categoryUuid, description }) {
+export async function createJob(env, tenantId, { companyUuid, jobAddress, billingAddress, categoryUuid, description }) {
   const token = await getValidAccessToken(env, tenantId);
   const res = await fetch(`${API_BASE}/job.json`, {
     method: "POST",
@@ -228,6 +228,7 @@ export async function createJob(env, tenantId, { companyUuid, jobAddress, catego
       status: "Work Order",
       company_uuid: companyUuid,
       job_address: jobAddress || "",
+      ...(billingAddress ? { billing_address: billingAddress } : {}),
       job_description: description || "",
       ...(categoryUuid ? { category_uuid: categoryUuid } : {}),
     }),

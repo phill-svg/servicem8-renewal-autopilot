@@ -5,7 +5,7 @@
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
 import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet, maybeCreateReminderDraft } from "./due-engine.js";
-import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob } from "./servicem8-api.js";
+import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob, getJob } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
 // `bg` the row surface, `pillBg`/`pillFg` the status pill. Semantic hues:
@@ -1180,6 +1180,39 @@ export async function setCustomerStage(env, tenantId, dueCustomerId, stage, note
   if (state.round === 1) await maybeCreateReminderDraft(env, tenantId, dueCustomerId);
 }
 
+// The address a booked job gets: the last job's own text when it's already
+// complete (ends in a postcode), otherwise rebuilt from what ServiceM8
+// geocoded for that job -- "12/26 cynthea Teague crescent greenway" becomes
+// "12/26 Cynthea Teague Crescent\nGreenway ACT 2900", the same shape as a job
+// typed properly. Only when the geocode clearly is this address (same street
+// number and street name), so a bad geocode can never move the booking.
+// Either way the result keeps the same property key as the typed address.
+const POSTCODE_AT_END = /\b\d{4}\s*$/;
+export function bookingAddress(job, fallback = "") {
+  const typed = String(job?.job_address || fallback || "").trim();
+  if (!job || POSTCODE_AT_END.test(typed)) return typed;
+  const { geo_number: num, geo_street: street, geo_city: city, geo_state: state, geo_postcode: postcode } = job;
+  if (String(job.geo_is_valid) !== "1" || !num || !street || !postcode) return typed;
+  const m = typed.match(/^\s*(?:unit\s+)?(?:([0-9a-z]+)\s*\/\s*)?([0-9]+[a-z]?)\b/i);
+  if (!m || m[2].toLowerCase() !== String(num).toLowerCase()) return typed;
+  if (!normalizeStreet(typed).includes(normalizeStreet(street))) return typed;
+  const full = `${m[1] ? `${m[1]}/` : ""}${num} ${street}\n${[city, state, postcode].filter(Boolean).join(" ")}`;
+  // The booked job must stay the same property as the row (normalizeStreet),
+  // or the open booking wouldn't hold the row and the completed job wouldn't
+  // reset it. A typed address with no suburb would gain one here, so add
+  // just the state and postcode instead.
+  if (normalizeStreet(full) !== normalizeStreet(typed)) return `${typed}\n${[state, postcode].filter(Boolean).join(" ")}`;
+  return full;
+}
+
+// Billing follows the job address unless the last job billed somewhere else
+// (a property manager, say) -- then that billing address is kept as it was.
+export function bookingBillingAddress(job, jobAddress) {
+  const billing = String(job?.billing_address || "").trim();
+  if (!billing || normalizeStreet(billing) === normalizeStreet(job?.job_address)) return jobAddress;
+  return billing;
+}
+
 // The customer booked on the phone: create their next job in ServiceM8 and
 // take the row out of the queue now rather than at the 3am recompute (which
 // will keep it suppressed while the job is open, via listOpenJobs). The
@@ -1195,9 +1228,17 @@ export async function bookJobForCustomer(env, tenantId, dueCustomerId, descripti
 
   let job;
   try {
+    let lastJob = null;
+    try {
+      if (row.last_job_uuid) lastJob = await getJob(env, tenantId, row.last_job_uuid);
+    } catch (err) {
+      console.error(`book job: could not read last job ${row.last_job_uuid}`, err);
+    }
+    const jobAddress = bookingAddress(lastJob, row.address_display);
     job = await createJob(env, tenantId, {
       companyUuid: row.servicem8_company_uuid,
-      jobAddress: row.address_display,
+      jobAddress,
+      billingAddress: bookingBillingAddress(lastJob, jobAddress),
       categoryUuid: row.servicem8_category_uuid,
       description: String(description || "").trim() || "Booked from Job Reminders after phone call",
     });
