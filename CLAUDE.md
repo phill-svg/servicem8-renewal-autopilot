@@ -78,6 +78,21 @@ a job. Design:
   dashboard load), but only when the stored text exactly equals what we generated. Staff edits only reach
   the DB at send time, so pending text is ours.
 
+## SMS reply wording + termite barrier (changed 2026-10-24)
+- ServiceM8 appends its own **"Reply here" link (Two-Way SMS)** to every SMS sent through it, plus an
+  Australian spam-compliance header/footer on some. It can't be turned off and it's the only way a reply
+  gets back. Our SMS said "Reply here" too, so it read twice -- now every SMS ends `SMS_REPLY` =
+  "Tap the link below to reply, or call us on (02) 6105 9771" (src/due-engine.js). Option 2's softer
+  "Get in touch" wording is unchanged; email ("Reply to this email") is unchanged.
+- **Termite barrier** is a third wording (`TERMITE_BARRIER`, not a real ServiceM8 category). Barrier jobs
+  are booked under Termite Management Treatment like the bait stations, so `resolveCategoryUuid` now reads
+  the **notes as well as the description**: "inspection" wins first, then "barrier" (Phill: "Anita
+  [Easterby-Wood] is a termite barrier not monitoring stations", job #251). 7 live customers.
+- `refreshOverdueFollowUpDrafts` is now **`refreshPendingDrafts`**: it rewrites EVERY pending draft
+  (rounds 1-3) to what the templates say now, so a wording change reaches the ~311 drafts already queued,
+  not just new ones. Sent/failed drafts are never touched (they're the record of what went out), and a
+  staff edit only reaches the DB at send time, so pending text is always ours.
+
 ## Manual stages + Book job (added 2026-10-16)
 - Each dashboard row has **Move to...** (Due / Contacted 1 / Contacted 2 / Contacted 3-Call customer /
   Called) for customers phoned by hand. It's `setCustomerStage` in `src/dashboard.js`, which maps each stage

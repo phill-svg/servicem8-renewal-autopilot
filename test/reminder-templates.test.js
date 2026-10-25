@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { templateForCategory, resolveCategoryUuid, secondaryTemplateFor, CATEGORY_UUID } from "../src/due-engine.js";
+import { templateForCategory, resolveCategoryUuid, secondaryTemplateFor, buildFollowUpTexts, REMINDER_TEMPLATES, CATEGORY_UUID, TERMITE_BARRIER } from "../src/due-engine.js";
 
 const templates = {
   default: { sms: "generic" },
@@ -81,4 +81,42 @@ test("secondaryTemplateFor: rodent's alt is the rodent-alt style", () => {
 test("secondaryTemplateFor: an unrecognized/default category has no meaningful alt", () => {
   assert.equal(secondaryTemplateFor(fullTemplates, "some-other-category-uuid"), null);
   assert.equal(secondaryTemplateFor(fullTemplates, null), null);
+});
+
+// Phill, 2026-10-24: "it needs to check the notes because Anita [Easterby-
+// Wood] is a termite barrier not monitoring stations" -- job #251, booked
+// under Termite Management Treatment, description "termite barrier -".
+test("resolveCategoryUuid: a barrier job is a barrier, not bait stations", () => {
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "termite barrier -\n2 hour drive to arrive."), TERMITE_BARRIER);
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "Termite chemical barrier"), TERMITE_BARRIER);
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "Chemical barrier around garage/granny flat"), TERMITE_BARRIER);
+});
+
+test("resolveCategoryUuid: the tech's notes count too, not just the description", () => {
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "Termite Treatment", "Chemical barrier installed, paid cc"), TERMITE_BARRIER);
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "Termite Treatment", "Job done\nInv"), CATEGORY_UUID.termiteStations);
+});
+
+test("resolveCategoryUuid: an inspection that merely mentions a barrier stays an inspection", () => {
+  // Job #560: "Termite inspection ... has a termite barrier quote".
+  assert.equal(resolveCategoryUuid(CATEGORY_UUID.termiteStations, "Termite inspection\nhas a termite barrier quote"), CATEGORY_UUID.termiteInspection);
+});
+
+test("a barrier customer is asked about their barrier, never bait stations", () => {
+  const tmpl = templateForCategory(REMINDER_TEMPLATES, TERMITE_BARRIER);
+  assert.match(tmpl.sms, /termite barrier is due for its annual inspection/);
+  assert.doesNotMatch(`${tmpl.sms} ${tmpl.email} ${tmpl.emailSubject}`, /bait|station/i);
+  // Option 2 offers a plain termite inspection -- the nearest other wording.
+  assert.equal(secondaryTemplateFor(REMINDER_TEMPLATES, TERMITE_BARRIER), REMINDER_TEMPLATES[CATEGORY_UUID.termiteInspection]);
+});
+
+test("the barrier wording carries through rounds 2 and 3, due soon and overdue", () => {
+  const customer = { contact_name_cache: "Anita Easterby-Wood", servicem8_category_uuid: CATEGORY_UUID.termiteStations, last_job_description_cache: "termite barrier -" };
+  for (const round of [2, 3]) {
+    for (const pastDue of [false, true]) {
+      const t = buildFollowUpTexts(customer, round, null, pastDue);
+      assert.match(t.sms, /termite barrier/, `round ${round} pastDue=${pastDue}`);
+      assert.doesNotMatch(`${t.sms} ${t.email} ${t.emailSubject}`, /bait|station/i);
+    }
+  }
 });

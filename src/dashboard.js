@@ -4,7 +4,7 @@
 // job-card Add-on button (src/addon.js) instead of being a static file.
 
 import { escapeHtml, randomId, parseServiceM8Date } from "./util.js";
-import { nextFollowUpDraftDate, refreshOverdueFollowUpDrafts, normalizeStreet, maybeCreateReminderDraft } from "./due-engine.js";
+import { nextFollowUpDraftDate, refreshPendingDrafts, normalizeStreet, maybeCreateReminderDraft } from "./due-engine.js";
 import { sendPlatformSms, sendPlatformEmail, listCategories, toE164Au, isSendableMobile, getCompany, createJob, getJob, listCompanyContacts, createJobContact } from "./servicem8-api.js";
 
 // Per-status palette. `accent` drives the row's left rail + phone link,
@@ -216,7 +216,7 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
     // A queued "due soon" follow-up for someone who has since gone past due
     // gets its overdue wording before staff see (and send) it.
     try {
-      await refreshOverdueFollowUpDrafts(env, tenantId);
+      await refreshPendingDrafts(env, tenantId);
     } catch (err) {
       console.error(`dashboard: overdue draft refresh failed for tenant ${tenantId}`, err);
     }
