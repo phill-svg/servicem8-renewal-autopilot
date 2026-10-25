@@ -681,6 +681,11 @@ async function insertDraftIfMissing(env, tenantId, dueCustomerId, channel, round
 // covers any category without its own entry (Commercial Treatment, Wildlife
 // Control, etc.) -- these UUIDs are TCB's own live category ids, confirmed
 // 2026-08-24 via list_categories.
+// Not a ServiceM8 category: a termite barrier job is booked under Termite
+// Management Treatment like the bait stations, and only the description or
+// notes say which it was (see resolveCategoryUuid).
+export const TERMITE_BARRIER = "termiteBarrier";
+
 export const CATEGORY_UUID = {
   generalPest: "97af1d3c-07ac-4aae-8862-23184055ce5b", // Premium Pest Treatment
   rodent: "65374f33-5111-4411-976d-232fc24a43ab", // Rodent Treatment
@@ -688,33 +693,46 @@ export const CATEGORY_UUID = {
   termiteInspection: "41bd4556-8fed-4626-b853-241e0b8b876b", // Termite Inspection
 };
 
-const REMINDER_TEMPLATES = {
+// How an SMS asks for a reply. ServiceM8 adds its own "Reply here" link (Two-Way
+// SMS) to the end of every SMS sent through it -- the only way a reply gets
+// back, since the sender can't receive plain replies -- so our text points at
+// that link instead of saying "Reply here" a second time. TCB's own number;
+// no tenant setting for it yet.
+const SMS_REPLY = "Tap the link below to reply, or call us on (02) 6105 9771";
+
+export const REMINDER_TEMPLATES = {
   default: {
-    sms: "Hi {{name}}, it's been about 12 months since your last pest treatment -- time to book your next service to keep your home protected. Reply here or give us a call to book a time!",
+    sms: `Hi {{name}}, it's been about 12 months since your last pest treatment -- time to book your next service to keep your home protected. ${SMS_REPLY} to book a time.`,
     emailSubject: "Time for your next pest treatment",
     email:
       "Hi {{name}},\n\nIt's been about 12 months since your last pest treatment. Regular treatments are the best way to keep your home protected against pests all year round.\n\nReply to this email or give us a call to book your next appointment.",
   },
   [CATEGORY_UUID.generalPest]: {
-    sms: "Hi {{name}}, it's time to book your next general pest treatment to keep your home protected. Reply here or give us a call to book a time!",
+    sms: `Hi {{name}}, it's time to book your next general pest treatment to keep your home protected. ${SMS_REPLY} to book a time.`,
     emailSubject: "Time for your next general pest treatment",
     email:
       "Hi {{name}},\n\nIt's time for your next general pest treatment. Regular treatments are the best way to keep your home protected against pests all year round.\n\nReply to this email or give us a call to book your next appointment.",
   },
   [CATEGORY_UUID.rodent]: {
-    sms: "Hi {{name}}, it's time for your next rodent treatment check-up. Reply here or give us a call to book a time!",
+    sms: `Hi {{name}}, it's time for your next rodent treatment check-up. ${SMS_REPLY} to book a time.`,
     emailSubject: "Time for your next rodent treatment",
     email:
       "Hi {{name}},\n\nIt's time for your next rodent treatment check-up. Regular monitoring keeps your property protected against rodent activity.\n\nReply to this email or give us a call to book your next appointment.",
   },
   [CATEGORY_UUID.termiteStations]: {
-    sms: "Hi {{name}}, your termite bait stations are due for their next check. Reply here or give us a call to book a time!",
+    sms: `Hi {{name}}, your termite bait stations are due for their next check. ${SMS_REPLY} to book a time.`,
     emailSubject: "Your termite bait stations are due for a check",
     email:
       "Hi {{name}},\n\nYour termite bait stations are due for their next check. Regular monitoring is essential to keep your termite protection active.\n\nReply to this email or give us a call to book your next appointment.",
   },
+  [TERMITE_BARRIER]: {
+    sms: `Hi {{name}}, your termite barrier is due for its annual inspection. ${SMS_REPLY} to book a time.`,
+    emailSubject: "Your termite barrier is due for its annual inspection",
+    email:
+      "Hi {{name}},\n\nYour termite barrier is due for its annual inspection. Regular inspections keep your barrier working and catch any termite activity early, before it causes damage.\n\nReply to this email or give us a call to book your next appointment.",
+  },
   [CATEGORY_UUID.termiteInspection]: {
-    sms: "Hi {{name}}, it's time for your next termite inspection. Reply here or give us a call to book a time!",
+    sms: `Hi {{name}}, it's time for your next termite inspection. ${SMS_REPLY} to book a time.`,
     emailSubject: "Time for your next termite inspection",
     email:
       "Hi {{name}},\n\nIt's time for your annual termite inspection. Regular inspections are the best way to catch termite activity early, before it causes damage.\n\nReply to this email or give us a call to book your next appointment.",
@@ -752,10 +770,17 @@ export function templateForCategory(templates, categoryUuid) {
 // (see secondaryTemplateFor) so a wrong guess is a toggle, not a mistake a
 // customer sees. Pure/testable: takes the raw category+description in,
 // no DB access.
-export function resolveCategoryUuid(categoryUuid, description) {
-  if (categoryUuid === CATEGORY_UUID.termiteStations && /inspection/i.test(description || "")) {
-    return CATEGORY_UUID.termiteInspection;
-  }
+//
+// A termite barrier (a chemical barrier, not stations) is booked under the
+// same category -- Phill, 2026-10-24: "it needs to check the notes because
+// Anita [Easterby-Wood] is a termite barrier not monitoring stations". So the
+// description AND the tech's notes are read for "barrier". An inspection job
+// stays an inspection even when it mentions a barrier ("has a termite barrier
+// quote").
+export function resolveCategoryUuid(categoryUuid, description, notes = "") {
+  if (categoryUuid !== CATEGORY_UUID.termiteStations) return categoryUuid;
+  if (/inspection/i.test(description || "")) return CATEGORY_UUID.termiteInspection;
+  if (/barrier/i.test(`${description || ""}\n${notes || ""}`)) return TERMITE_BARRIER;
   return categoryUuid;
 }
 
@@ -767,48 +792,51 @@ export function resolveCategoryUuid(categoryUuid, description) {
 export function secondaryTemplateFor(templates, categoryUuid) {
   if (categoryUuid === CATEGORY_UUID.termiteStations) return templates[CATEGORY_UUID.termiteInspection];
   if (categoryUuid === CATEGORY_UUID.termiteInspection) return templates[CATEGORY_UUID.termiteStations];
+  if (categoryUuid === TERMITE_BARRIER) return templates[CATEGORY_UUID.termiteInspection];
   if (categoryUuid === CATEGORY_UUID.generalPest) return templates.generalPestAlt;
   if (categoryUuid === CATEGORY_UUID.rodent) return templates.rodentAlt;
   return null;
 }
 
-export async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
-  const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
-  const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
-  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
+// Every piece of text for a round-1 reminder -- one builder for creating the
+// drafts and for rewording ones already queued (refreshPendingDrafts), so the
+// two can never disagree.
+export function buildRound1Texts(dueCustomer, settings) {
+  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache, dueCustomer.last_job_notes_cache);
   const tmpl = templateForCategory(REMINDER_TEMPLATES, effectiveCategory);
   const altTmpl = secondaryTemplateFor(REMINDER_TEMPLATES, effectiveCategory);
-
   // First name only in the message body -- contact_name_cache stores the
   // full name (used elsewhere for staff-facing display), but "Hi Sarah" reads
   // far more natural than "Hi Sarah Lim" in an actual reminder.
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
-
+  const fill = (text) => signOff(text.replace("{{name}}", firstName), settings);
   // A tenant-configured override (Phase 2 setup wizard) still wins for
-  // everyone, same as before this change -- the category templates only
-  // kick in when no custom template has been set. A custom override has no
-  // concept of a second option, so no alt is offered when one's set.
+  // everyone -- the category templates only kick in when no custom template
+  // has been set. A custom override has no concept of a second option.
+  const t = {
+    sms: fill(tmpl.sms),
+    smsAlt: altTmpl ? fill(altTmpl.sms) : null,
+    emailSubject: tmpl.emailSubject,
+    email: fill(tmpl.email),
+    emailAltSubject: altTmpl?.emailSubject || null,
+    emailAlt: altTmpl ? fill(altTmpl.email) : null,
+  };
+  if (settings?.sms_template) Object.assign(t, { sms: fill(settings.sms_template), smsAlt: null });
+  if (settings?.email_body_template) {
+    Object.assign(t, { emailSubject: settings.email_subject_template || tmpl.emailSubject, email: fill(settings.email_body_template), emailAltSubject: null, emailAlt: null });
+  }
+  return t;
+}
+
+export async function maybeCreateReminderDraft(env, tenantId, dueCustomerId) {
+  const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
+  const dueCustomer = await env.DB.prepare("SELECT * FROM due_customers WHERE id = ?").bind(dueCustomerId).first();
+  const t = buildRound1Texts(dueCustomer, settings);
   if (dueCustomer.contact_phone_cache) {
-    if (settings?.sms_template) {
-      const body = signOff(settings.sms_template.replace("{{name}}", firstName), settings);
-      await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body);
-    } else {
-      const body = signOff(tmpl.sms.replace("{{name}}", firstName), settings);
-      const altBody = altTmpl ? signOff(altTmpl.sms.replace("{{name}}", firstName), settings) : null;
-      await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, body, null, altBody);
-    }
+    await insertDraftIfMissing(env, tenantId, dueCustomerId, "sms", 1, null, t.sms, null, t.smsAlt);
   }
   if (dueCustomer.contact_email_cache) {
-    if (settings?.email_body_template) {
-      const subject = settings.email_subject_template || tmpl.emailSubject;
-      const body = signOff(settings.email_body_template.replace("{{name}}", firstName), settings);
-      await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, subject, body);
-    } else {
-      const body = signOff(tmpl.email.replace("{{name}}", firstName), settings);
-      const altSubject = altTmpl?.emailSubject || null;
-      const altBody = altTmpl ? signOff(altTmpl.email.replace("{{name}}", firstName), settings) : null;
-      await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, tmpl.emailSubject, body, altSubject, altBody);
-    }
+    await insertDraftIfMissing(env, tenantId, dueCustomerId, "email", 1, t.emailSubject, t.email, t.emailAltSubject, t.emailAlt);
   }
 }
 
@@ -854,31 +882,37 @@ export function nextFollowUpDraftDate(dueCustomer, intervalMonths) {
 const FOLLOWUP_TEMPLATES = {
   2: {
     default: {
-      sms: "Hi {{name}}, just a friendly follow-up -- your pest treatment is coming up due. Reply here or give us a call to lock in a time!",
+      sms: `Hi {{name}}, just a friendly follow-up -- your pest treatment is coming up due. ${SMS_REPLY} to lock in a time.`,
       emailSubject: "Following up -- your pest treatment is due soon",
       email:
         "Hi {{name}},\n\nJust following up on your upcoming pest treatment -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
     },
     [CATEGORY_UUID.generalPest]: {
-      sms: "Hi {{name}}, just a friendly follow-up -- your general pest treatment is coming up due. Reply here or give us a call to lock in a time!",
+      sms: `Hi {{name}}, just a friendly follow-up -- your general pest treatment is coming up due. ${SMS_REPLY} to lock in a time.`,
       emailSubject: "Following up -- your general pest treatment is due soon",
       email:
         "Hi {{name}},\n\nJust following up on your upcoming general pest treatment -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
     },
     [CATEGORY_UUID.rodent]: {
-      sms: "Hi {{name}}, just a friendly follow-up -- your rodent treatment check-up is coming up due. Reply here or give us a call to lock in a time!",
+      sms: `Hi {{name}}, just a friendly follow-up -- your rodent treatment check-up is coming up due. ${SMS_REPLY} to lock in a time.`,
       emailSubject: "Following up -- your rodent treatment is due soon",
       email:
         "Hi {{name}},\n\nJust following up on your upcoming rodent treatment check-up -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
     },
     [CATEGORY_UUID.termiteStations]: {
-      sms: "Hi {{name}}, just a friendly follow-up -- your termite bait station check is coming up due. Reply here or give us a call to lock in a time!",
+      sms: `Hi {{name}}, just a friendly follow-up -- your termite bait station check is coming up due. ${SMS_REPLY} to lock in a time.`,
       emailSubject: "Following up -- your termite bait station check is due soon",
       email:
         "Hi {{name}},\n\nJust following up on your upcoming termite bait station check -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
     },
+    [TERMITE_BARRIER]: {
+      sms: `Hi {{name}}, just a friendly follow-up -- your termite barrier inspection is coming up due. ${SMS_REPLY} to lock in a time.`,
+      emailSubject: "Following up -- your termite barrier inspection is due soon",
+      email:
+        "Hi {{name}},\n\nJust following up on your termite barrier's annual inspection -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
+    },
     [CATEGORY_UUID.termiteInspection]: {
-      sms: "Hi {{name}}, just a friendly follow-up -- your termite inspection is coming up due. Reply here or give us a call to lock in a time!",
+      sms: `Hi {{name}}, just a friendly follow-up -- your termite inspection is coming up due. ${SMS_REPLY} to lock in a time.`,
       emailSubject: "Following up -- your termite inspection is due soon",
       email:
         "Hi {{name}},\n\nJust following up on your upcoming termite inspection -- it's due soon and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.",
@@ -898,31 +932,37 @@ const FOLLOWUP_TEMPLATES = {
   },
   3: {
     default: {
-      sms: "Hi {{name}}, final reminder -- your pest treatment is due very soon. Reply here or call us to book before it lapses!",
+      sms: `Hi {{name}}, final reminder -- your pest treatment is due very soon. ${SMS_REPLY} to book before it lapses.`,
       emailSubject: "Final reminder -- your pest treatment is due",
       email:
         "Hi {{name}},\n\nThis is a final reminder that your pest treatment is due very soon.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
     },
     [CATEGORY_UUID.generalPest]: {
-      sms: "Hi {{name}}, final reminder -- your general pest treatment is due very soon. Reply here or call us to book before it lapses!",
+      sms: `Hi {{name}}, final reminder -- your general pest treatment is due very soon. ${SMS_REPLY} to book before it lapses.`,
       emailSubject: "Final reminder -- your general pest treatment is due",
       email:
         "Hi {{name}},\n\nThis is a final reminder that your general pest treatment is due very soon.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
     },
     [CATEGORY_UUID.rodent]: {
-      sms: "Hi {{name}}, final reminder -- your rodent treatment check-up is due very soon. Reply here or call us to book before it lapses!",
+      sms: `Hi {{name}}, final reminder -- your rodent treatment check-up is due very soon. ${SMS_REPLY} to book before it lapses.`,
       emailSubject: "Final reminder -- your rodent treatment is due",
       email:
         "Hi {{name}},\n\nThis is a final reminder that your rodent treatment check-up is due very soon.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
     },
     [CATEGORY_UUID.termiteStations]: {
-      sms: "Hi {{name}}, final reminder -- your termite bait station check is due very soon. Reply here or call us to book before it lapses!",
+      sms: `Hi {{name}}, final reminder -- your termite bait station check is due very soon. ${SMS_REPLY} to book before it lapses.`,
       emailSubject: "Final reminder -- your termite bait station check is due",
       email:
         "Hi {{name}},\n\nThis is a final reminder that your termite bait station check is due very soon. Keeping this up to date is essential to keep your termite protection active.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
     },
+    [TERMITE_BARRIER]: {
+      sms: `Hi {{name}}, final reminder -- your termite barrier inspection is due very soon. ${SMS_REPLY} to book before it lapses.`,
+      emailSubject: "Final reminder -- your termite barrier inspection is due",
+      email:
+        "Hi {{name}},\n\nThis is a final reminder that your termite barrier's annual inspection is due very soon. Regular inspections keep your barrier working and catch termite activity early.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
+    },
     [CATEGORY_UUID.termiteInspection]: {
-      sms: "Hi {{name}}, final reminder -- your termite inspection is due very soon. Reply here or call us to book before it lapses!",
+      sms: `Hi {{name}}, final reminder -- your termite inspection is due very soon. ${SMS_REPLY} to book before it lapses.`,
       emailSubject: "Final reminder -- your termite inspection is due",
       email:
         "Hi {{name}},\n\nThis is a final reminder that your termite inspection is due very soon. Regular inspections are the best way to catch termite activity early, before it causes damage.\n\nReply to this email or give us a call to book your next appointment before it lapses.",
@@ -952,12 +992,12 @@ function overdueFollowUps(service, { home = "home", extra = "" } = {}) {
   const tail = extra ? ` ${extra}` : "";
   return {
     2: {
-      sms: `Hi {{name}}, just a friendly follow-up -- your ${service} is now overdue. Reply here or give us a call to book a time!`,
+      sms: `Hi {{name}}, just a friendly follow-up -- your ${service} is now overdue. ${SMS_REPLY} to book a time.`,
       emailSubject: `Following up -- your ${service} is overdue`,
       email: `Hi {{name}},\n\nJust following up -- your ${service} is now overdue and we'd love to get you booked in.\n\nReply to this email or give us a call to arrange a time.`,
     },
     3: {
-      sms: `Hi {{name}}, final reminder -- your ${service} is overdue. Reply here or call us to book in and keep your ${home} protected!`,
+      sms: `Hi {{name}}, final reminder -- your ${service} is overdue. ${SMS_REPLY} to book in and keep your ${home} protected.`,
       emailSubject: `Final reminder -- your ${service} is overdue`,
       email: `Hi {{name}},\n\nThis is a final reminder that your ${service} is overdue.${tail}\n\nReply to this email or give us a call to book in and keep your ${home} protected.`,
     },
@@ -987,6 +1027,9 @@ const OVERDUE_BY_KEY = {
   [CATEGORY_UUID.termiteInspection]: overdueFollowUps("termite inspection", {
     extra: "Regular inspections are the best way to catch termite activity early, before it causes damage.",
   }),
+  [TERMITE_BARRIER]: overdueFollowUps("termite barrier inspection", {
+    extra: "Regular inspections keep your barrier working and catch termite activity early.",
+  }),
   generalPestAlt: overdueAltFollowUps("general pest treatment"),
   rodentAlt: overdueAltFollowUps("rodent treatment check-up", { home: "property" }),
 };
@@ -1008,7 +1051,7 @@ export function isPastDue(dueCustomer, intervalMonths, now = new Date()) {
 // refreshing ones already queued, so the two can never disagree.
 export function buildFollowUpTexts(dueCustomer, round, settings, pastDue) {
   const firstName = (dueCustomer.contact_name_cache || "").trim().split(/\s+/)[0] || "there";
-  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache);
+  const effectiveCategory = resolveCategoryUuid(dueCustomer.servicem8_category_uuid, dueCustomer.last_job_description_cache, dueCustomer.last_job_notes_cache);
   const set = (pastDue ? FOLLOWUP_OVERDUE_TEMPLATES : FOLLOWUP_TEMPLATES)[round];
   const tmpl = templateForCategory(set, effectiveCategory);
   const altTmpl = secondaryTemplateFor(set, effectiveCategory);
@@ -1040,51 +1083,43 @@ async function maybeCreateFollowUpDraft(env, tenantId, dueCustomer, intervalMont
   }
 }
 
-// A round-2/3 draft queued while the due date was still ahead keeps its "due
-// soon" text after the date passes. Rewrites such pending drafts to the
-// overdue wording -- but only when the stored text is exactly what we
-// generated, so nothing anyone else wrote is ever overwritten. (Staff edits
-// only reach the row when the draft is sent, so a pending row's text is
-// normally ours anyway.) Run nightly and on every dashboard load, so the
-// queue reads right the moment a customer passes their due date.
-export async function refreshOverdueFollowUpDrafts(env, tenantId, now = new Date()) {
+// Rewrites every queued (pending) draft to what the templates say right now:
+// a round-2/3 draft queued while the due date was still ahead gets the
+// overdue wording once it passes (Phill, 2026-10-06), and a wording change --
+// the SMS reply line (2026-10-24), termite barrier vs bait stations -- reaches
+// drafts already waiting instead of only new ones. Pending text is always
+// ours: a staff edit only reaches the row when the draft is sent, and sent or
+// failed drafts are never touched. Run nightly and on every dashboard load.
+export async function refreshPendingDrafts(env, tenantId, now = new Date()) {
   const { results: drafts } = await env.DB.prepare(
     `SELECT rd.id, rd.channel, rd.round, rd.draft_subject, rd.draft_body, rd.alt_draft_subject, rd.alt_draft_body,
-            dc.contact_name_cache, dc.servicem8_category_uuid, dc.last_job_description_cache, dc.last_completed_at, cc.interval_months
+            dc.contact_name_cache, dc.servicem8_category_uuid, dc.last_job_description_cache, dc.last_job_notes_cache,
+            dc.last_completed_at, cc.interval_months
      FROM reminder_drafts rd
      JOIN due_customers dc ON dc.id = rd.due_customer_id
      JOIN category_config cc ON cc.id = dc.category_config_id
-     WHERE rd.tenant_id = ? AND rd.status = 'pending' AND rd.round IN (2, 3)`
+     WHERE rd.tenant_id = ? AND rd.status = 'pending' AND rd.round IN (1, 2, 3)`
   )
     .bind(tenantId)
     .all();
   if (!drafts || !drafts.length) return 0;
 
-  const settings = await env.DB.prepare("SELECT business_name FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
+  const settings = await env.DB.prepare("SELECT * FROM tenant_settings WHERE tenant_id = ?").bind(tenantId).first();
   let refreshed = 0;
   for (const d of drafts) {
-    if (!isPastDue(d, d.interval_months, now)) continue;
-    const before = buildFollowUpTexts(d, d.round, settings, false);
-    const after = buildFollowUpTexts(d, d.round, settings, true);
-    const stored =
-      d.channel === "sms"
-        ? [d.draft_body, d.alt_draft_body]
-        : [d.draft_subject, d.draft_body, d.alt_draft_subject, d.alt_draft_body];
-    const ours =
-      d.channel === "sms"
-        ? [before.sms, before.smsAlt]
-        : [before.emailSubject, before.email, before.emailAltSubject, before.emailAlt];
-    if (stored.some((v, i) => (v ?? null) !== (ours[i] ?? null))) continue; // not our "due soon" text -- leave it
-
+    const t = d.round === 1 ? buildRound1Texts(d, settings) : buildFollowUpTexts(d, d.round, settings, isPastDue(d, d.interval_months, now));
     if (d.channel === "sms") {
+      if ((d.draft_body ?? null) === t.sms && (d.alt_draft_body ?? null) === (t.smsAlt ?? null)) continue;
       await env.DB.prepare("UPDATE reminder_drafts SET draft_body = ?, alt_draft_body = ? WHERE id = ? AND status = 'pending'")
-        .bind(after.sms, after.smsAlt, d.id)
+        .bind(t.sms, t.smsAlt, d.id)
         .run();
     } else {
+      const want = [t.emailSubject, t.email, t.emailAltSubject ?? null, t.emailAlt ?? null];
+      if ([d.draft_subject, d.draft_body, d.alt_draft_subject, d.alt_draft_body].every((v, k) => (v ?? null) === want[k])) continue;
       await env.DB.prepare(
         "UPDATE reminder_drafts SET draft_subject = ?, draft_body = ?, alt_draft_subject = ?, alt_draft_body = ? WHERE id = ? AND status = 'pending'"
       )
-        .bind(after.emailSubject, after.email, after.emailAltSubject, after.emailAlt, d.id)
+        .bind(...want, d.id)
         .run();
     }
     refreshed++;
@@ -1099,7 +1134,7 @@ export async function refreshOverdueFollowUpDrafts(env, tenantId, now = new Date
 // for a customer who's since become suppressed (rebooked) or been dismissed,
 // since both are filtered out of the WHERE clause below.
 export async function generateFollowUpDraftsForTenant(env, tenantId) {
-  await refreshOverdueFollowUpDrafts(env, tenantId);
+  await refreshPendingDrafts(env, tenantId);
   const { results: candidates } = await env.DB.prepare(
     `SELECT * FROM due_customers WHERE tenant_id = ? AND suppressed_reason IS NULL AND dismissed_at IS NULL AND reminder_round IN (2, 3)`
   )

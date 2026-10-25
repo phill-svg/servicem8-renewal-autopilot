@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildFollowUpTexts, isPastDue, refreshOverdueFollowUpDrafts, generateFollowUpDraftsForTenant, CATEGORY_UUID } from "../src/due-engine.js";
+import { buildFollowUpTexts, buildRound1Texts, isPastDue, refreshPendingDrafts, generateFollowUpDraftsForTenant, CATEGORY_UUID } from "../src/due-engine.js";
 import { makeSqliteEnv } from "./helpers/sqlite-d1.js";
 
 // Phill, 2026-10-06: "even if the service is overdue it still says in the sms
@@ -36,7 +36,7 @@ test("not yet due: the existing 'coming up' wording is unchanged", () => {
   const t2 = buildFollowUpTexts(customer(CATEGORY_UUID.generalPest), 2, SETTINGS, false);
   assert.equal(
     t2.sms,
-    "Hi Sarah, just a friendly follow-up -- your general pest treatment is coming up due. Reply here or give us a call to lock in a time!\n\n- TCB Pest Control"
+    "Hi Sarah, just a friendly follow-up -- your general pest treatment is coming up due. Tap the link below to reply, or call us on (02) 6105 9771 to lock in a time.\n\n- TCB Pest Control"
   );
   const t3 = buildFollowUpTexts(customer(CATEGORY_UUID.generalPest), 3, SETTINGS, false);
   assert.equal(t3.emailSubject, "Final reminder -- your general pest treatment is due");
@@ -44,9 +44,9 @@ test("not yet due: the existing 'coming up' wording is unchanged", () => {
 
 test("the agreed overdue wording", () => {
   const t2 = buildFollowUpTexts(customer(CATEGORY_UUID.generalPest), 2, null, true);
-  assert.equal(t2.sms, "Hi Sarah, just a friendly follow-up -- your general pest treatment is now overdue. Reply here or give us a call to book a time!");
+  assert.equal(t2.sms, "Hi Sarah, just a friendly follow-up -- your general pest treatment is now overdue. Tap the link below to reply, or call us on (02) 6105 9771 to book a time.");
   const t3 = buildFollowUpTexts(customer(CATEGORY_UUID.generalPest), 3, null, true);
-  assert.equal(t3.sms, "Hi Sarah, final reminder -- your general pest treatment is overdue. Reply here or call us to book in and keep your home protected!");
+  assert.equal(t3.sms, "Hi Sarah, final reminder -- your general pest treatment is overdue. Tap the link below to reply, or call us on (02) 6105 9771 to book in and keep your home protected.");
   assert.equal(t3.emailSubject, "Final reminder -- your general pest treatment is overdue");
 });
 
@@ -114,24 +114,57 @@ test("a queued 'due very soon' round-3 draft is rewritten once the customer is p
     .prepare("INSERT INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_body, alt_draft_body, status, created_at) VALUES ('s3', 't', 'dc1', 'sms', 3, ?, ?, 'pending', 0)")
     .run(soon.sms, soon.smsAlt);
 
-  assert.equal(await refreshOverdueFollowUpDrafts(env, "t"), 2);
+  assert.equal(await refreshPendingDrafts(env, "t"), 2);
   assert.equal(draft(env, "email", 3).draft_subject, "Final reminder -- your general pest treatment is overdue");
   assert.doesNotMatch(draft(env, "email", 3).alt_draft_body, SOON);
   assert.match(draft(env, "sms", 3).draft_body, /is overdue/);
-  assert.equal(await refreshOverdueFollowUpDrafts(env, "t"), 0, "idempotent");
+  assert.equal(await refreshPendingDrafts(env, "t"), 0, "idempotent");
 });
 
-test("a pending draft that isn't our generated text, or one already sent, is left alone", async () => {
+test("a draft already sent is left alone; a stale pending one is brought up to date", async () => {
   const env = envWithCustomer({ completed: monthsAgo(13), round: 3 });
   const soon = buildFollowUpTexts({ contact_name_cache: "Sarah Lim", servicem8_category_uuid: CATEGORY_UUID.generalPest }, 3, SETTINGS, false);
+  // Old wording left in the queue by a previous version of the templates.
   env.db
-    .prepare("INSERT INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_body, status, created_at) VALUES ('custom', 't', 'dc1', 'sms', 3, 'Hi Sarah, custom words due soon', 'pending', 0)")
+    .prepare("INSERT INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_body, status, created_at) VALUES ('stale', 't', 'dc1', 'sms', 3, 'Hi Sarah, final reminder -- your general pest treatment is due very soon. Reply here or call us to book before it lapses!', 'pending', 0)")
     .run();
   env.db
     .prepare("INSERT INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_body, alt_draft_body, status, created_at) VALUES ('sent', 't', 'dc1', 'email', 3, ?, ?, 'sent', 0)")
     .run(soon.email, soon.emailAlt);
 
-  assert.equal(await refreshOverdueFollowUpDrafts(env, "t"), 0);
-  assert.equal(draft(env, "sms", 3).draft_body, "Hi Sarah, custom words due soon");
-  assert.equal(draft(env, "email", 3).draft_body, soon.email);
+  assert.equal(await refreshPendingDrafts(env, "t"), 1);
+  assert.match(draft(env, "sms", 3).draft_body, /is overdue\. Tap the link below to reply/);
+  assert.equal(draft(env, "email", 3).draft_body, soon.email, "a sent draft is the record of what went out");
+});
+
+// Phill, 2026-10-24: our SMS said "Reply here", and ServiceM8 then appends its
+// own "Reply here" link (Two-Way SMS) to every message -- so it read twice.
+test("an SMS points at ServiceM8's own reply link instead of saying 'Reply here'", () => {
+  for (const cat of CATEGORIES) {
+    const texts = [buildRound1Texts({ contact_name_cache: "Sarah Lim", servicem8_category_uuid: cat }, null)];
+    for (const round of [2, 3]) for (const past of [false, true]) texts.push(buildFollowUpTexts(customer(cat), round, null, past));
+    for (const t of texts) {
+      // No SMS says "Reply here" any more. The main wording points at the
+      // link; Option 2 keeps its softer "Get in touch" voice, which never
+      // clashed with ServiceM8's link in the first place.
+      for (const sms of [t.sms, t.smsAlt].filter(Boolean)) assert.doesNotMatch(sms, /reply here/i, sms);
+      assert.match(t.sms, /Tap the link below to reply, or call us on \(02\) 6105 9771/, t.sms);
+      // Email replies go to a real inbox -- that wording is unchanged.
+      assert.match(t.email, /Reply to this email/);
+    }
+  }
+});
+
+// 311 round-1/2/3 drafts were already queued with the old wording when it
+// changed: a wording fix has to reach those, not just new drafts.
+test("drafts already queued are brought up to the current wording, round 1 included", async () => {
+  const env = envWithCustomer({ completed: monthsAgo(13), round: 1 });
+  env.db
+    .prepare("INSERT INTO reminder_drafts (id, tenant_id, due_customer_id, channel, round, draft_body, status, created_at) VALUES ('s1', 't', 'dc1', 'sms', 1, 'Hi Sarah, it''s time to book your next general pest treatment to keep your home protected. Reply here or give us a call to book a time!', 'pending', 0)")
+    .run();
+  assert.equal(await refreshPendingDrafts(env, "t"), 1);
+  const body = draft(env, "sms", 1).draft_body;
+  assert.doesNotMatch(body, /Reply here/);
+  assert.match(body, /Tap the link below to reply/);
+  assert.equal(await refreshPendingDrafts(env, "t"), 0, "idempotent");
 });
