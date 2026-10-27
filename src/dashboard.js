@@ -695,6 +695,12 @@ export async function renderDashboardHtml(env, tenantId, token, { focusCompanyUu
   .empty-state, #empty-filtered { padding: 52px 24px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; font-size: 14px; line-height: 1.6; box-shadow: var(--sh-sm); max-width: 520px; margin: 0 auto; }
   #empty-filtered { display: none; margin-top: 9px; }
 
+  /* Confirms what just happened, since the page reloads and the row has
+     usually moved to another tab by then. */
+  .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 50; max-width: 92vw; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #fff; background: #0f172a; border-radius: 10px; padding: 10px 16px; box-shadow: 0 6px 20px rgba(15,23,42,.3); animation: toast-in .18s ease-out; }
+  .toast .ic { color: #86efac; }
+  @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
   .focus-bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 0 0 14px; padding: 9px 14px; font-size: 13px; font-weight: 600; color: var(--brand-ink); background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; }
   .focus-bar.muted { color: var(--muted); background: #f7f8fa; border-color: var(--line-2); }
   .focus-bar .ic { color: currentColor; flex: none; }
@@ -932,7 +938,66 @@ ${
   });
 
   filterSelect.addEventListener('change', applyFilters);
+
+  // Sending, marking called and moving a stage all reload the page, because
+  // the server decides which tab the row belongs in afterwards. Phill,
+  // 2026-10-27: "it reloads the screen and takes me to the main screen again
+  // ... i cant see where i was up to in the list". So the view is put back
+  // exactly as it was -- tab, plan, service, search and scroll position --
+  // and a toast says what just happened, since the row itself has usually
+  // moved to the Contacted list by then.
+  var VIEW_KEY = 'jobReminders.view';
+  function reloadKeepingPlace(note) {
+    try {
+      sessionStorage.setItem(VIEW_KEY, JSON.stringify({
+        bucket: activeBucket, plan: activePlan, planLabel: activePlanLabel,
+        service: filterSelect.value, q: searchBox.value, y: window.pageYOffset || 0, note: note || '',
+      }));
+    } catch (e) {}
+    location.reload();
+  }
+  function toast(text) {
+    var el = document.createElement('div');
+    el.className = 'toast';
+    el.innerHTML = ${scriptJson(IC_SEND)};
+    el.appendChild(document.createTextNode(text));
+    document.body.appendChild(el);
+    setTimeout(function () { el.remove(); }, 4500);
+  }
+
+  // sessionStorage throws in some in-app browsers -- a failure here just
+  // means the page opens on the default tab, as it always used to.
+  var restoreY = 0;
+  (function restoreView() {
+    var raw = null;
+    try {
+      raw = sessionStorage.getItem(VIEW_KEY);
+      sessionStorage.removeItem(VIEW_KEY);
+    } catch (e) {}
+    if (!raw) return;
+    var v;
+    try { v = JSON.parse(raw); } catch (e) { return; }
+    if (!v) return;
+    if (v.service) filterSelect.value = v.service;
+    if (v.q) searchBox.value = v.q;
+    if (v.plan) {
+      activePlan = v.plan;
+      activePlanLabel = v.planLabel || '';
+      planBtns.forEach(function (b) { b.classList.toggle('active', b.dataset.tabPlan === v.plan); });
+    }
+    if (v.bucket) {
+      activeBucket = v.bucket;
+      bucketBeforePlan = v.bucket;
+    }
+    showBucketUi(activePlan ? '' : activeBucket);
+    restoreY = Number(v.y) || 0;
+    if (v.note) toast(v.note);
+  })();
+
   applyFilters();
+  // After applyFilters, so the rows that will be hidden aren't taking up
+  // height when the scroll position is restored.
+  if (restoreY) window.scrollTo(0, restoreY);
 
   document.querySelectorAll('.draft-card').forEach(function (card) {
     var chanBtns = Array.prototype.slice.call(card.querySelectorAll('.chan-btn'));
@@ -1003,7 +1068,11 @@ ${
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: ${scriptJson(token)}, draftId: draftId, editedBody: textarea.value, variant: currentVariant, resend: resending }),
         });
-        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
+        if (res.ok) {
+          var row = card.closest('tr');
+          var who = row && row.querySelector('.cust-name') ? row.querySelector('.cust-name').textContent.trim() : 'customer';
+          reloadKeepingPlace(ch.toUpperCase() + ' sent to ' + who);
+        } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; chanBtns.forEach(function (x) { x.disabled = false; }); variantBtns.forEach(function (x) { x.disabled = false; }); }
     });
   });
@@ -1018,7 +1087,11 @@ ${
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: btn.dataset.called }),
         });
-        if (res.ok) { location.reload(); } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
+        if (res.ok) {
+          var calledRow = btn.closest('tr');
+          var calledWho = calledRow && calledRow.querySelector('.cust-name') ? calledRow.querySelector('.cust-name').textContent.trim() : 'customer';
+          reloadKeepingPlace('Marked as called: ' + calledWho);
+        } else { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
       } catch (e) { btn.textContent = 'Failed -- retry'; btn.disabled = false; }
     });
   });
@@ -1030,6 +1103,9 @@ ${
     sel.addEventListener('change', async function () {
       var stage = sel.value;
       if (!stage) return;
+      var stageLabel = (sel.options[sel.selectedIndex].textContent || '').replace(' (now)', '');
+      var stageRow = sel.closest('tr');
+      var stageWho = stageRow && stageRow.querySelector('.cust-name') ? stageRow.querySelector('.cust-name').textContent.trim() : 'customer';
       var note = prompt('Note to record with this move (optional)', stageNoteDefaults[stage] || '');
       if (note === null) { sel.value = ''; return; }
       sel.disabled = true;
@@ -1039,7 +1115,7 @@ ${
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: ${scriptJson(token)}, dueCustomerId: sel.dataset.stageRow, stage: stage, note: note }),
         });
-        if (res.ok) { location.reload(); } else { alert('Could not move this customer -- please try again.'); sel.value = ''; sel.disabled = false; }
+        if (res.ok) { reloadKeepingPlace('Moved ' + stageWho + ' to ' + stageLabel); } else { alert('Could not move this customer -- please try again.'); sel.value = ''; sel.disabled = false; }
       } catch (e) { alert('Could not move this customer -- please try again.'); sel.value = ''; sel.disabled = false; }
     });
   });

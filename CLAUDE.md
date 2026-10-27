@@ -93,6 +93,16 @@ a job. Design:
   not just new ones. Sent/failed drafts are never touched (they're the record of what went out), and a
   staff edit only reaches the DB at send time, so pending text is always ours.
 
+## The dashboard keeps your place (changed 2026-10-27)
+- Sending, "Mark called" and a stage move still reload the page (the server decides which tab the row
+  belongs in afterwards), but `reloadKeepingPlace` first saves the view to `sessionStorage`
+  (urgency tab / Contacted stage, plan tab, service filter, search text, scroll position) and restores it
+  on load, then shows a toast ("SMS sent to Jill Smith"). Phill: "it reloads the screen and takes me to
+  the main screen again ... i cant see where i was up to in the list".
+- The toast matters as much as the scroll: after a send the row leaves the tab you were on, so without it
+  the list just appears to lose someone. sessionStorage is wrapped in try/catch -- if it throws (some
+  in-app browsers) the page simply opens on the default tab, as before.
+
 ## Manual stages + Book job (added 2026-10-16)
 - Each dashboard row has **Move to...** (Due / Contacted 1 / Contacted 2 / Contacted 3-Call customer /
   Called) for customers phoned by hand. It's `setCustomerStage` in `src/dashboard.js`, which maps each stage
